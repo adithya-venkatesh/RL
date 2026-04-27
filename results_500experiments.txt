@@ -1,0 +1,83 @@
+PROGRESS UPDATE - Completed 500/500 experiments
+======================================================================
+Pessimistic wins:     15 (3.0%)
+CAR wins:             86 (17.2%)
+Off-Policy wins:      399 (79.8%)
+Ties:                 0 (0.0%)
+======================================================================
+
+======================================================================
+ALL EXPERIMENTS COMPLETE!
+======================================================================
+✓ Checkpoint file 'experiment_checkpoint.pkl' removed
+
+Total experiments: 500
+
+Win Distribution:
+  Pessimistic Q-Learning wins: 15 (3.0%)
+  CAR Operator wins:           86 (17.2%)
+  Off-Policy Greedy wins:      399 (79.8%)
+  Ties:                        0 (0.0%)
+
+Overall Performance:
+  Pessimistic Q-Learning:
+    Mean reward: -4.34
+    Std dev:     51.32
+    Min reward:  -567.32
+    Max reward:  7.63
+
+  CAR Operator:
+    Mean reward: -111.25
+    Std dev:     148.08
+    Min reward:  -828.32
+    Max reward:  7.96
+
+  Off-Policy Greedy:
+    Mean reward: 7.49
+    Std dev:     0.16
+    Min reward:  6.99
+    Max reward:  7.90
+
+Performance Comparisons:
+  Off-Policy vs Pessimistic: 11.830
+  Off-Policy vs CAR:         118.739
+  CAR vs Pessimistic:        -106.908
+
+✓ All results saved to: gridworld_experiments_500runs.csv
+======================================================================
+EXPERIMENT COMPLETE
+======================================================================
+
+======================================================================
+All experiments complete! Generating analysis...
+======================================================================
+======================================================================
+ANALYSIS OF 500 EXPERIMENTS
+======================================================================
+
+--- Pessimistic Q-Learning ---
+Mean test reward: -4.34 ± 51.37
+Mean vs attacker: -4.02 ± 42.13
+
+--- CAR Operator ---
+Mean test reward: -111.25 ± 148.23
+Mean vs attacker: -110.26 ± 149.73
+
+--- Off-Policy Greedy Target ---
+Mean test reward: 7.49 ± 0.16
+Mean vs attacker: 7.48 ± 0.16
+
+--- Performance Comparisons ---
+Off-Policy vs Pessimistic: 11.830
+Off-Policy vs CAR:         118.739
+CAR vs Pessimistic:        -106.908
+
+--- Win Distribution ---
+winner
+OFFPOLICY_GREEDY    399
+CAR                  86
+PESSIMISTIC          15
+Name: count, dtype: int64
+
+======================================================================
+Analysis complete!

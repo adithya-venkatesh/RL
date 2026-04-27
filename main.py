@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""gridworld_withCAR.py
+"""main.py
 
-Modified gridworld with CAR (Consistent Adversarial Robust) operator implementation.
+Modified gridworld with CAR operator implementation.
 Includes pause/resume functionality for long-running experiments.
 
 Based on original gridworld.ipynb with additions for:
@@ -10,10 +10,19 @@ Based on original gridworld.ipynb with additions for:
 3. CSV logging for 500 experiments
 4. Pause/Resume capability
 5. Progress tracking and analysis
+
+Nov-27-2025: Based on feedback, adding the following in this version:
+1. Fixing bugs in the CAR operator implementation
+2. Adding clearer comments and documentation
+3: Add new learning function (greedy target)
+4: Add new play function (off-policy)
+5: Update main() to test this method
+6: Run experiments and compare
 """
 
 # Import all the libraries
 import math
+import time
 import random
 import numpy as np
 import gymnasium as gym
@@ -24,7 +33,7 @@ from datetime import datetime
 import signal
 import sys
 
-# Adi - Changes to next two lines
+# Changes to next two lines 
 import stable_baselines3
 from stable_baselines3 import SAC, PPO, TD3, DQN
 from stable_baselines3.common.noise import NormalActionNoise
@@ -42,6 +51,7 @@ class GridWorld(gym.Env):
         self.height = 5
         self.width = 5
         self.grid = np.zeros(( self.height, self.width)) - 1
+        self.total_step = 0
 
         # Set random start location for the agent
         self.current_location = [4, np.random.randint(0,5)]
@@ -127,10 +137,10 @@ class GridWorld(gym.Env):
                     self.current_location = [self.current_location[0], self.current_location[1] + 1]
                     reward = self.get_reward(self.current_location)
         self.total_step += 1
-        # Adi - Changes here to return 5th parameter
+        # Changes here to return 5th parameter
         # Separated done into terminated (natural episode end) and truncated (time limit reached)
         # Changed return from 4 values to 5 values: (observation, reward, terminated, truncated, info)
-        # This matches the Gymnasium v0.26+ API that stable-baselines3 expects!
+      
         terminated = self.current_location in self.terminal_states
         truncated = self.total_step >= 1000
 
@@ -178,25 +188,32 @@ class GridWorld(gym.Env):
 
 
     def check_state(self):
-        """Check if the agent is in a terminal state (gold or bomb), if so return 'TERMINAL'"""
         if self.current_location in self.terminal_states:
             return 'TERMINAL'
-
+    
     def reset(self, seed=None):
         self.total_step = 0
-        self.current_location =  [np.random.randint(0,5), np.random.randint(0,5)]
-        # Adi - Defaulting to a random value
-        if seed is not None:
-          np.random.seed(seed)
-
+        if seed is not None:  
+            np.random.seed(seed)
+        
+        self.current_location = [np.random.randint(0,5), np.random.randint(0,5)]
+        
         while self.current_location in self.terminal_states:
-            self.current_location =  [np.random.randint(0,5), np.random.randint(0,5)]
+            self.current_location = [np.random.randint(0,5), np.random.randint(0,5)]
         return np.asarray(self.current_location)
 
 # Define the attack class
 class GridWorld_RL_Attack(gym.Env):
     ## Initialise starting data
-    def __init__(self, agentQ):
+    def __init__(self, agentQ, agent_type='pessimistic'):
+        """
+        Initialize attack environment for training adversarial attackers.
+        
+        Args:
+            agentQ: The agent to train against
+            agent_type: 'pessimistic', 'car', or 'offpolicy'
+        """
+        self.agent_type = agent_type  # Store which type of agent we're attacking
         # Set information about the gridworld
         self.height = 5
         self.width = 5
@@ -284,14 +301,47 @@ class GridWorld_RL_Attack(gym.Env):
             self.purturb_state = self.current_location
 
 
-        agent_action = self.agentQ.choose_action_att(['UP', 'DOWN', 'LEFT', 'RIGHT'] , tuple(self.purturb_state), 0)
-        self.current_location = self.take_action(self.current_location, agent_action)
-        possible_true_states = self.agentQ.get_ball(self.purturb_state)
-        belief_before_action = states_intersection(self.belief, possible_true_states)
-        self.belief = set()
-        for state in belief_before_action:
-            self.belief.add(self.take_action(state, agent_action))
-        self.agentQ.defender_policy = self.agentQ.get_policy_with_belief(self.agentQ.defender_policy, self.belief)
+        # Agent action selection depends on agent type
+        if self.agent_type == 'pessimistic':
+            # PESSIMISTIC: Use belief-based policy
+            agent_action = self.agentQ.choose_action_att(
+                ['UP', 'DOWN', 'LEFT', 'RIGHT'], 
+                tuple(self.purturb_state), 
+                0
+            )
+            self.current_location = self.take_action(self.current_location, agent_action)
+            
+            # Update belief for pessimistic agent
+            possible_true_states = self.agentQ.get_ball(self.purturb_state)
+            belief_before_action = states_intersection(self.belief, possible_true_states)
+            self.belief = set()
+            for state in belief_before_action:
+                self.belief.add(self.take_action(state, agent_action))
+            self.agentQ.defender_policy = self.agentQ.get_policy_with_belief(
+                self.agentQ.defender_policy, self.belief
+            )
+        
+        elif self.agent_type == 'car':
+            # CAR: Use simple greedy from Q-table (CAR operator)
+            agent_action = self.agentQ.choose_action_car(
+                ['UP', 'DOWN', 'LEFT', 'RIGHT'],
+                tuple(self.purturb_state),
+                0
+            )
+            self.current_location = self.take_action(self.current_location, agent_action)
+        
+        elif self.agent_type == 'offpolicy':
+            # OFF-POLICY: Use greedy from Q-table at test time
+            state = tuple(self.purturb_state)
+            q_values = self.agentQ.q_table_withatt[state]
+            maxValue = max(q_values.values())
+            agent_action = np.random.choice([
+                k for k, v in q_values.items() if v == maxValue
+            ])
+            self.current_location = self.take_action(self.current_location, agent_action)
+        
+        else:
+            raise ValueError(f"Unknown agent_type: {self.agent_type}")
         
         terminated = list(self.current_location) in self.terminal_states
         reward = -self.get_reward(self.current_location)
@@ -355,7 +405,7 @@ class GridWorld_RL_Attack(gym.Env):
         self.belief = set()
         for state in self.agentQ.all_state:
             self.belief.add(state)
-        # Adi - setting a random value to seed
+        # setting a random value to seed
         if seed is not None:
           np.random.seed(seed)
         
@@ -465,33 +515,59 @@ class Q_Agent():
         current_q_value = self.q_table_withatt[tuple(old_state)][action]
         self.q_table_withatt[tuple(old_state)][action] = (1 - alpha) * current_q_value + alpha * (reward + self.gamma * min_q_value)
 
+    def learn_with_greedy_target(self, old_state, reward, new_state, action, alpha=0.1):
+        """
+        Off-policy learning: Behavior policy uses max-min with belief,
+        but target policy is GREEDY (like vanilla Q-learning).
+    
+        Key difference from pessimistic: In the Q-update, we use
+        max_a Q(s', a) instead of max-min over belief.
+        """
+        # Greedy target: just take max over all actions at new_state
+        max_q_value = max(self.q_table_withatt[tuple(new_state)].values())
+    
+        # Standard Q-learning update (same as vanilla Q-learning)
+        current_q_value = self.q_table_withatt[tuple(old_state)][action]
+    
+        self.q_table_withatt[tuple(old_state)][action] = \
+            (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value)
+    
     def find_maxmin(self, q_table, next_state, policy, new_policy):
+        """Compute max-min Bellman target (without belief tracking)."""
         states = self.get_ball(next_state)
         values = dict()
-        possible_actions = []
-        for i in states:
-            possible_action = policy[i]
-            if possible_action not in possible_actions:
-                possible_actions.append(possible_action)
-        for action in possible_actions:
-            values[action] = q_table[next_state][action]
-        return min(values.values())
+        
+        # For each action, compute minimum Q-value over all perturbed states
+        for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
+            q_values_for_action = []
+            for state in states:
+                q_values_for_action.append(q_table[state][action])
+            values[action] = min(q_values_for_action)
+        
+        # Return maximum over actions (max-min)
+        return max(values.values())
 
     def find_maxmin_with_belief(self, q_table_true, q_table_withatt, next_state, policy, new_policy, belief):
+        """Compute max-min Bellman target with belief tracking."""
         states = self.get_ball(next_state)
-        values = dict()
-        possible_actions = []
         possible_states = states_intersection(belief, states)
-        if (len(possible_states) > 1):
-            for i in possible_states:
-                possible_action = policy[i]
-                if possible_action not in possible_actions:
-                    possible_actions.append(possible_action)
-            for action in possible_actions:
-                values[action] = q_table_withatt[next_state][action]
-            return np.min(list(values.values()))
-        else:
+        values = dict()
+        
+        if len(possible_states) > 1:
+            # For each action, compute minimum Q-value over all possible states in belief
+            for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
+                q_values_for_action = []
+                for state in possible_states:
+                    q_values_for_action.append(q_table_withatt[state][action])
+                values[action] = min(q_values_for_action)
+            # Return maximum over actions (max-min)
+            return max(values.values())
+        elif len(possible_states) == 1:
+            # Single state in belief - return max Q-value
             return max(q_table_withatt[list(possible_states)[0]].values())
+        else:
+            # Empty belief intersection - fallback to next_state
+            return max(q_table_withatt[next_state].values())
 
     def learn_with_att(self, old_state, reward, new_state, action, policy, new_policy, alpha = 0.1):
         """Updates the Q-value table using Q-learning"""
@@ -507,15 +583,14 @@ class Q_Agent():
 
         self.q_table_withatt[tuple(old_state)][action] = (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value_in_new_state)
 
-
     def get_att_state(self, true_state, policy):
+        """Find worst-case perturbed state given policy."""
         states = self.get_ball(true_state)
         values = dict()
         for i in states:
-            values[i] = self.q_table_withatt[true_state][policy[i]]
+            values[i] = self.q_table_withatt[i][policy[i]]
         att_state = min(values, key = values.get)
         return att_state
-
 
     def pareto_update(self, policy):
         no_change = False
@@ -525,118 +600,87 @@ class Q_Agent():
             value_min = dict()
             for state in self.all_state:
                 states = self.get_ball(state)
-                values = []
-                for i in states:
-                    values.append(self.q_table_withatt[state][policy[i]])
-                value_min[state] = min(values)
+                values = dict()
+                for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
+                    q_values = []
+                    for i in states:
+                        q_values.append(self.q_table_withatt[i][action])
+                    values[action] = np.mean(q_values)
+                value_min[state] = values
 
             for state in self.all_state:
-                states = self.get_ball(state)
-                for true_state in states:
-                    for action in self.environment.actions:
-                        condition_v = value_min[true_state]<self.q_table_withatt[true_state][action] and self.q_table_withatt[true_state][action]<self.q_table_withatt[true_state][policy[state]]
-                        condition_q = True
-                        condition_atleast = False
-                        for i in states:
-                            if i == true_state:
-                                continue
-                            else:
-                                if self.q_table_withatt[true_state][policy[state]] > self.q_table_withatt[true_state][action]:
-                                    condition_q = False
-                                    break
-                                if self.q_table_withatt[true_state][policy[state]] < self.q_table_withatt[true_state][action]:
-                                    condition_atleast = True
-                        if condition_v and condition_q and condition_atleast:
-                            if state not in old.keys():
-                                old[state] = policy[state]
-                                policy[state] = action
-                                no_change = False
-                                break
-                            elif old[state] != action:
-                                old[state] = policy[state]
-                                policy[state] = action
-                                no_change = False
-                                break
-                            else:
-                                continue
+                old[state] = policy[state]
+                policy[state] = max(value_min[state], key = value_min[state].get)
+
+            for state in self.all_state:
+                if old[state] != policy[state]:
+                    no_change = False
+
         return policy
 
-
-
     def get_policy(self, init = False):
+        policy = dict()
         if init:
-            policy = dict()
             for state in self.all_state:
-                policy[state] = self.environment.actions[np.random.randint(0, len(self.environment.actions))]
+                policy[state] = np.random.choice(['UP', 'DOWN', 'LEFT', 'RIGHT'])
         else:
-            policy = dict()
             for state in self.all_state:
                 values = dict()
                 states = self.get_ball(state)
-                for action in self.environment.actions:
+                for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
                     tmp = []
                     for true_state in states:
                         tmp.append(self.q_table_withatt[true_state][action])
-                    values[action] = min(tmp)
+                    values[action] = np.mean(tmp)
                 policy[state] = max(values, key = values.get)
         return policy
 
     def get_policy_naive(self):
         policy = dict()
         for state in self.all_state:
+            policy[state] = max(self.q_table_withatt[state], key = self.q_table_withatt[state].get)
+        return policy
+
+    def get_policy_with_belief(self, policy, belief):
+        new_policy = dict()
+        value_min = dict()
+        for state in self.all_state:
+            states = self.get_ball(state)
+            possible_states = states_intersection(belief, states)
             values = dict()
-            for action in self.environment.actions:
-                values[action] = self.q_table[state][action]
-            policy[state] = max(values, key = values.get)
-        return policy
+            
+            if len(possible_states) > 1:
+                for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']:
+                    q_values = []
+                    for i in possible_states:
+                        q_values.append(self.q_table_withatt[i][action])
+                    values[action] = np.mean(q_values)
+                value_min[state] = values
+            elif len(possible_states) == 1:
+                value_min[state] = self.q_table_withatt[list(possible_states)[0]]
+            else:
+                value_min[state] = {action: self.q_table_withatt[state][action] for action in ['UP', 'DOWN', 'LEFT', 'RIGHT']}
 
-    def get_policy_with_belief(self, old_policy, belief, init = False):
-        if init:
-            policy = dict()
-            for state in self.all_state:
-                policy[state] = self.environment.actions[np.random.randint(0, len(self.environment.actions))]
-        else:
-            policy = dict()
-            if len(belief) == 1:
-                values = dict()
-                for action in self.environment.actions:
-                    values[action] = self.q_table_withatt[list(belief)[0]][action]
-                true_action = max(values, key = values.get)
-                policy = copy.deepcopy(old_policy)
-                for state in self.all_state:
-                    policy[state] = true_action
-                return policy
-            for state in self.all_state:
-                values = dict()
-                states = self.get_ball(state)
-                possible_states = states_intersection(belief, states)
-                if len(possible_states)!=0:
-                    for action in self.environment.actions:
-                        tmp = []
-                        for true_state in possible_states:
-                            tmp.append(self.q_table_withatt[true_state][action])
-                        values[action] = np.mean(tmp)
-                    policy[state] = max(values, key = values.get)
-                else:
-                    policy[state] = old_policy[state]
-        return policy
-
-
+        for state in self.all_state:
+            new_policy[state] = max(value_min[state], key = value_min[state].get)
+        return new_policy
 
     def get_ball(self, state):
-        result = []
-        result.append([state[0]-1, state[1]])
-        result.append([state[0], state[1]])
-        result.append([state[0]+1, state[1]])
-        result.append([state[0], state[1]-1])
-        result.append([state[0], state[1]+1])
-        true_result = []
-        for i in result:
-            if not ((i[0]<0 or i[0]>self.environment.height-1) or (i[1]<0 or i[1]>self.environment.width-1)):
-                true_result.append(tuple(i))
-        return true_result
+        x = state[0]
+        y = state[1]
+        states = []
+        if x != 0:
+            states.append((x-1,y))
+        if x != 4:
+            states.append((x+1,y))
+        if y != 0:
+            states.append((x,y-1))
+        if y != 4:
+            states.append((x,y+1))
+        states.append((x,y))
+        return states
 
-# Define the play function - original
+# Define the routine - play
 def play(environment, agent, trials=500, max_steps_per_episode=1000, learn=False):
     """The play function runs iterations and updates Q-values if desired."""
     reward_per_episode = [] # Initialise performance log
@@ -648,13 +692,17 @@ def play(environment, agent, trials=500, max_steps_per_episode=1000, learn=False
         old_state = environment.reset()
         while step < max_steps_per_episode and game_over != True: # Run until max steps or until game is finished
             old_state = tuple(environment.current_location)
-            eps = linear_schedule_exp(0.001, 0.5, trials, trial)
+            if learn:
+                eps = linear_schedule_exp(0.01, 0.2, trials, trial)
+            else:
+                eps = 0
             action = agent.choose_action(environment.actions, eps)
+            
             _, reward, terminated, truncated, _ = environment.step(action)
             new_state = environment.current_location
 
             if learn == True: # Update Q-values if learning is specified
-                alpha = linear_schedule_exp(0.01, 0.5, trials, trial)
+                alpha = linear_schedule_exp(0.005, 0.1, trials, trial)
                 agent.learn(old_state, reward, new_state, action, alpha)
 
             cumulative_reward += reward
@@ -663,17 +711,18 @@ def play(environment, agent, trials=500, max_steps_per_episode=1000, learn=False
             if environment.check_state() == 'TERMINAL': # If game is in terminal state, game over and start next trial
                 environment.__init__()
                 game_over = True
-        reward_per_episode.append(cumulative_reward) # Append reward for current trial to performance log
 
+        reward_per_episode.append(cumulative_reward) # Append reward for current trial to performance log
+    
     return reward_per_episode # Return performance log
 
-# define the routine - play_att
+# Define the routine - play_att
 def play_att(environment, agent, trials=500, max_steps_per_episode=1000, learn=False):
     """The play function runs iterations and updates Q-values if desired."""
     reward_per_episode = [] # Initialise performance log
     if learn:
         agent.q_table_withatt = copy.deepcopy(agent.q_table)
-        agent.defender_policy = agent.pareto_update(agent.get_policy(init = True))
+        agent.defender_policy = agent.get_policy_naive()
     else:
         agent.defender_policy = agent.get_policy_naive()
     
@@ -722,8 +771,9 @@ def states_intersection(current_belief, states):
     return new_belief
 
 # Define the routine - play_with_belief
-def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, attack_model = None):
+def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, attack_model = None, measure_time=False):
     """The play function runs iterations and updates Q-values if desired."""
+    inference_times = []  # Track inference time per action at test time, added Nov-29-2025
     reward_per_episode = [] # Initialise performance log
     if learn:
         agent.q_table_withatt = copy.deepcopy(agent.q_table)
@@ -771,11 +821,20 @@ def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1
                 att_state = tuple(att_state)
             else:
                 att_state = agent.get_att_state(old_state, agent.defender_policy)
+                
+            # Start timing inference (only at test time)
+            if not learn and measure_time:
+                action_start_time = time.perf_counter()
+                
             if learn:
                 eps = linear_schedule_exp(0.01, 0.2, trials, trial)
             else:
                 eps = 0
             action = agent.choose_action_att(environment.actions , att_state, eps)
+            # End timing inference
+            if not learn and measure_time:
+                action_end_time = time.perf_counter()
+                inference_times.append(action_end_time - action_start_time)
             possible_true_states = agent.get_ball(att_state)
             belief_before_action = states_intersection(belief, possible_true_states)
             belief = set()
@@ -801,15 +860,96 @@ def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1
                 game_over = True
 
         reward_per_episode.append(cumulative_reward) # Append reward for current trial to performance log
-    return reward_per_episode # Return performance log
-
-# NEW FUNCTION: Play with CAR Operator
-def play_with_car_operator(environment, agent, trials=500, max_steps_per_episode=1000, learn=False):
-    """
-    Play function implementing the CAR operator approach.
+    # Return performance log and optionally average inference time
+    if measure_time and not learn:
+        avg_inference_time = np.mean(inference_times) if inference_times else 0
+        return reward_per_episode, avg_inference_time
+    else:
+        return reward_per_episode
     
+def play_pessimistic_clean(environment, agent, trials=100, max_steps_per_episode=1000, measure_time=False):
+    """
+    Test Pessimistic Q-Learning in CLEAN environment (NO attacker).
+    Agent acts greedily on TRUE states using trained Q-table.
+    
+    Args:
+        environment: GridWorld environment
+        agent: Q_Agent with trained q_table_withatt
+        trials: Number of episodes
+        max_steps_per_episode: Max steps per episode
+        measure_time: If True, measure inference time
+    
+    Returns:
+        If measure_time=True: (reward_per_episode, avg_inference_time)
+        Otherwise: reward_per_episode
     """
     reward_per_episode = []
+    inference_times = []
+    
+    for trial in range(trials):
+        cumulative_reward = 0
+        step = 0
+        game_over = False
+        environment.reset()
+        
+        while step < max_steps_per_episode and game_over != True:
+            old_state = tuple(environment.current_location)
+            
+            # Start timing
+            if measure_time:
+                action_start_time = time.perf_counter()
+            
+            # NO ATTACKER - greedy action on true state
+            q_values = agent.q_table_withatt[old_state]
+            maxValue = max(q_values.values())
+            action = np.random.choice([k for k, v in q_values.items() if v == maxValue])
+            
+            # End timing
+            if measure_time:
+                action_end_time = time.perf_counter()
+                inference_times.append(action_end_time - action_start_time)
+            
+            # Take action in environment
+            _, reward, terminated, truncated, _ = environment.step(action)
+            
+            cumulative_reward += reward
+            step += 1
+            
+            if environment.check_state() == 'TERMINAL':
+                environment.__init__()
+                game_over = True
+        
+        reward_per_episode.append(cumulative_reward)
+    
+    if measure_time:
+        avg_inference_time = np.mean(inference_times) if inference_times else 0
+        return reward_per_episode, avg_inference_time
+    else:
+        return reward_per_episode   
+
+# New function: Play with CAR Operator
+def play_with_car_operator(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, measure_time=False, attack_model=None):
+    """
+    Play episodes using CAR (Consistent Adversarial Robust) operator.
+    
+    Training: Uses CAR operator for both behavior and target policy
+    Testing: Uses greedy action selection from CAR operator
+    
+    Args:
+        environment: GridWorld environment
+        agent: Q_Agent with trained q_table_withatt
+        trials: Number of episodes to run
+        max_steps_per_episode: Max steps per episode
+        learn: If True, train the agent; if False, test
+        measure_time: If True, measure inference time during testing
+        attack_model: Optional attacker model for adversarial testing
+    
+    Returns:
+        If measure_time=True and learn=False: (reward_per_episode, avg_inference_time)
+        Otherwise: reward_per_episode
+    """
+    reward_per_episode = []
+    inference_times = []  # Track inference time per action at test time, added Nov-29-2025
     
     if learn:
         # Initialize adversarial Q-table
@@ -830,16 +970,43 @@ def play_with_car_operator(environment, agent, trials=500, max_steps_per_episode
             else:
                 eps = 0
             
-            # Action selection: greedy with respect to Q-function (CAR way)
-            # This is DIFFERENT from your belief-based policy
-            action = agent.choose_action_car(environment.actions, old_state, eps)
+            # Start timing for test-time inference
+            if not learn and measure_time:
+                action_start_time = time.perf_counter()
             
-            # Take step in environment
+            # Action selection (works for both training and testing)
+            # Check if we're testing against an attacker
+            if attack_model is not None and not learn:
+                # Adversarial testing: Attacker perturbs observation
+                # Attacker sees true state and chooses perturbation direction
+                attack_obs = np.array(old_state)
+                attack_action, _ = attack_model.predict(attack_obs, deterministic=True)
+                
+                # Apply perturbation to get perturbed state
+                if attack_action in [0, 1, 2, 3, 4]:
+                    perturbation_direction = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'STAY'][attack_action]
+                else:
+                    perturbation_direction = attack_action
+                
+                perturbed_state = apply_perturbation(old_state, perturbation_direction)
+                
+                # Agent acts greedily on PERTURBED observation
+                action = agent.choose_action_car(environment.actions, perturbed_state, eps=0)
+            else:
+                # Normal operation (training or testing without attacker)
+                action = agent.choose_action_car(environment.actions, old_state, eps)
+            
+            # End timing
+            if not learn and measure_time:
+                action_end_time = time.perf_counter()
+                inference_times.append(action_end_time - action_start_time)
+            
+            # Take action in environment
             _, reward, terminated, truncated, _ = environment.step(action)
             new_state = environment.current_location
             
-            # Q-learning update using CAR operator
-            if learn == True:
+            # Learning update
+            if learn:
                 alpha = linear_schedule_exp(0.01, 0.1, trials, trial)
                 agent.learn_with_car_operator(old_state, reward, new_state, action, alpha)
             
@@ -852,21 +1019,249 @@ def play_with_car_operator(environment, agent, trials=500, max_steps_per_episode
         
         reward_per_episode.append(cumulative_reward)
     
-    return reward_per_episode
+    if measure_time and not learn:
+        avg_inference_time = np.mean(inference_times) if inference_times else 0
+        return reward_per_episode, avg_inference_time
+    else:
+        return reward_per_episode
 
-# Define the RL for training with attack vector
-def train_RL_attack_with_belief(agentQ):
-    env = GridWorld_RL_Attack(agentQ)
-    checkpoint_callback = CheckpointCallback(save_freq=5000, save_path="RL_attack",
-                                             name_prefix='rl_model')
+# Helper function for applying perturbations
+def apply_perturbation(state, perturbation_direction):
+    """Apply a perturbation to a state based on direction."""
+    x, y = state
+    
+    if perturbation_direction == 'UP':
+        if x > 0:
+            return (x - 1, y)
+    elif perturbation_direction == 'DOWN':
+        if x < 4:
+            return (x + 1, y)
+    elif perturbation_direction == 'LEFT':
+        if y > 0:
+            return (x, y - 1)
+    elif perturbation_direction == 'RIGHT':
+        if y < 4:
+            return (x, y + 1)
+    
+    # If can't move or stay, return original state
+    return state
 
-    model = DQN("MlpPolicy", env, learning_rate = 1e-3, learning_starts = 1000, batch_size = 256, exploration_final_eps=0.001,
-                gamma = 1, tau = 0.2, train_freq = (5, "step"), policy_kwargs={"net_arch" : [256,128]}, tensorboard_log="RL_attack/", verbose=1)
+# Nov-27-2025: New function - play_offpolicy_greedy_target
+def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, measure_time=False, attack_model=None):
+    """
+    Off-policy approach: Behavior policy uses pessimistic max-min with belief tracking,
+    but target policy is Greedy (simple max over Q-values).
+    
+    This combines safety during exploration (pessimistic behavior) with 
+    optimism in value estimation (greedy target).
+    
+    Args:
+        environment: GridWorld environment
+        agent: Q_Agent with q_table and q_table_withatt
+        trials: Number of episodes
+        max_steps_per_episode: Max steps per episode
+        learn: If True, train; if False, test
+        measure_time: If True, measure inference time during testing
+        attack_model: Optional attacker for adversarial testing
+    
+    Returns:
+        If measure_time=True and learn=False: (reward_per_episode, avg_inference_time)
+        Otherwise: reward_per_episode
+    """
+    reward_per_episode = []
+    inference_times = []
+    
+    if learn:
+        # Initialize adversarial Q-table and defender policy
+        agent.q_table_withatt = copy.deepcopy(agent.q_table)
+        agent.defender_policy = agent.pareto_update(agent.get_policy(init=True))
+    
+    for trial in range(trials):
+        cumulative_reward = 0
+        step = 0
+        game_over = False
+        old_state = environment.reset()
+        
+        if learn:
+            # TRAINING: Use belief tracking for safety
+            belief = set()
+            for state in agent.all_state:
+                belief.add(state)
+            agent.defender_policy = agent.get_policy_with_belief(agent.defender_policy, belief)
+            
+            while step < max_steps_per_episode and game_over != True:
+                old_state = tuple(environment.current_location)
+                
+                # Behavior policy: pessimistic (worst-case over belief)
+                att_state = agent.get_att_state(old_state, agent.defender_policy)
+                
+                eps = linear_schedule_exp(0.01, 0.2, trials, trial)
+                action = agent.choose_action_att(environment.actions, att_state, eps)
+                
+                # Update belief
+                possible_true_states = agent.get_ball(att_state)
+                belief_before_action = states_intersection(belief, possible_true_states)
+                belief = set()
+                for state in belief_before_action:
+                    belief.add(environment.take_action(state, action))
+                
+                # Update policy with new belief (for next iteration)
+                new_policy = agent.get_policy_with_belief(agent.defender_policy, belief)
+                
+                # Take action in environment
+                _, reward, terminated, truncated, _ = environment.step(action)
+                new_state = environment.current_location
+                
+                # TARGET POLICY: Use Greedy (this is the key difference!)
+                # NOT max-min like pessimistic, just simple max
+                alpha = linear_schedule_exp(0.01, 0.1, trials, trial)
+                agent.learn_with_greedy_target(old_state, reward, new_state, action, alpha)
+                
+                # Update defender policy for next step
+                agent.defender_policy = new_policy
+                
+                cumulative_reward += reward
+                step += 1
+                
+                if environment.check_state() == 'TERMINAL':
+                    environment.__init__()
+                    game_over = True
+        
+        else:
+            # TESTING: Just use Greedy (no belief tracking)
+            # This is the whole point - fast inference
+            while step < max_steps_per_episode and game_over != True:
+                old_state = tuple(environment.current_location)
+                
+                eps = 0
+                
+                # Start timing
+                if measure_time:
+                    action_start_time = time.perf_counter()
+                
+                # Check if we're testing against an attacker
+                if attack_model is not None:
+                    # ADVERSARIAL TESTING: Attacker perturbs observation
+                    # Attacker sees true state and chooses perturbation
+                    attack_obs = np.array(old_state)
+                    attack_action, _ = attack_model.predict(attack_obs, deterministic=True)
+                    
+                    # Convert integer action to string direction
+                    if attack_action in [0, 1, 2, 3, 4]:
+                        perturbation_direction = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'STAY'][attack_action]
+                    else:
+                        perturbation_direction = attack_action
+                    
+                    # Apply perturbation to get perturbed state
+                    perturbed_state = apply_perturbation(old_state, perturbation_direction)
+                    
+                    # Agent acts on PERTURBED observation (doesn't know it's perturbed)
+                    q_values_of_state = agent.q_table_withatt[perturbed_state]
+                else:
+                    # No attack: Use true state
+                    q_values_of_state = agent.q_table_withatt[old_state]
+                
+                # Greedy action selection
+                maxValue = max(q_values_of_state.values())
+                action = np.random.choice([k for k, v in q_values_of_state.items() if v == maxValue])
+                
+                # End timing
+                if measure_time:
+                    action_end_time = time.perf_counter()
+                    inference_times.append(action_end_time - action_start_time)
+                
+                # Take action in environment
+                _, reward, terminated, truncated, _ = environment.step(action)
+                new_state = environment.current_location
+                
+                cumulative_reward += reward
+                step += 1
+                
+                if environment.check_state() == 'TERMINAL':
+                    environment.__init__()
+                    game_over = True
+        
+        reward_per_episode.append(cumulative_reward)
+    
+    if measure_time and not learn:
+        avg_inference_time = np.mean(inference_times) if inference_times else 0
+        return reward_per_episode, avg_inference_time
+    else:
+        return reward_per_episode
 
-    model.learn(total_timesteps=20000, callback = checkpoint_callback)
+
+# Define the RL for training with attack vector 
+def train_RL_attack_with_belief(agentQ, agent_type='pessimistic', model_name='attacker'):
+    """
+    Train attacker against specific agent type.
+    
+    This creates separate attackers for each algorithm.
+    Each attacker learns to exploit the specific weaknesses of its target algorithm.
+    
+    Args:
+        agentQ: The trained agent to attack
+        agent_type: Type of agent - 'pessimistic', 'car', or 'offpolicy'
+        model_name: Base name for saved model file (default: 'attacker')
+    
+    Returns:
+        Trained attack model
+    
+    The attacker learns by playing against the agent in GridWorld_RL_Attack environment.
+    It observes the agent's behavior and learns which perturbations are most effective.
+    """
+    print(f"\n{'='*70}")
+    print(f"TRAINING ATTACKER AGAINST {agent_type.upper()} AGENT")
+    print(f"{'='*70}")
+    print(f"Agent type: {agent_type}")
+    print(f"Model name: {model_name}_{agent_type}")
+    print(f"Training timesteps: 20,000")
+    print(f"{'='*70}\n")
+    
+    # Create attack environment with correct agent type
+    env = GridWorld_RL_Attack(agentQ, agent_type=agent_type)
+    
+    # Setup checkpoint callback with agent-specific path
+    checkpoint_path = f"RL_attack/{agent_type}"
+    checkpoint_callback = CheckpointCallback(
+        save_freq=5000, 
+        save_path=checkpoint_path,
+        name_prefix=f'{model_name}_{agent_type}'
+    )
+    
+    # Train attacker
+    model = DQN(
+        "MlpPolicy", 
+        env, 
+        learning_rate=1e-3, 
+        learning_starts=1000, 
+        batch_size=256, 
+        exploration_final_eps=0.001,
+        gamma=1, 
+        tau=0.2, 
+        train_freq=(5, "step"), 
+        policy_kwargs={"net_arch": [256, 128]}, 
+        tensorboard_log=f"RL_attack/{agent_type}/", 
+        verbose=1
+    )
+    
+    # Train the attacker
+    print(f"\nTraining attacker against {agent_type} agent...")
+    model.learn(total_timesteps=200000, callback=checkpoint_callback)
+    
+    # Save final model with descriptive name
+    final_model_path = f"{model_name}_{agent_type}"
+    model.save(final_model_path)
+    
+    print(f"\n{'='*70}")
+    print(f"ATTACKER TRAINING COMPLETE!")
+    print(f"{'='*70}")
+    print(f"Model saved as: {final_model_path}.zip")
+    print(f"Checkpoints saved to: {checkpoint_path}/")
+    print(f"{'='*70}\n")
+    
     return model
 
-# NEW FUNCTION: CSV Logging
+# New function CSV Logging
 def log_experiment_to_csv(experiment_number, results_dict, filename='gridworld_experiments.csv'):
     """
     Logs experiment results to a CSV file.
@@ -887,26 +1282,39 @@ def log_experiment_to_csv(experiment_number, results_dict, filename='gridworld_e
     file_exists = os.path.isfile(filename)
     
     # Define all possible fields
+    # Updated on Nov-25-2025 to add more fields
     fieldnames = [
-        'experiment_number',
-        'timestamp',
-        'baseline1_avg_reward',
-        'baseline2_avg_reward',
-        'pessimistic_train_avg_reward',
-        'pessimistic_test_avg_reward',
-        'car_train_avg_reward',
-        'car_test_avg_reward',
-        'pessimistic_vs_attacker_reward',
-        'car_vs_attacker_reward',
-        'winner',
-        'performance_difference',
-        'pessimistic_train_std',
-        'pessimistic_test_std',
-        'car_train_std',
-        'car_test_std',
-        'pessimistic_vs_attacker_std',
-        'car_vs_attacker_std'
-    ]
+    'experiment_number',
+    'timestamp',
+    'seed',
+    'baseline_avg_reward',
+    'pessimistic_train_avg_reward',
+    'pessimistic_train_std',
+    'pessimistic_clean_reward',              
+    'pessimistic_clean_std',                
+    'pessimistic_clean_inference_time_ms',   
+    'pessimistic_vs_attacker_reward',        
+    'pessimistic_vs_attacker_std',           
+    'car_train_avg_reward',
+    'car_train_std',
+    'car_test_avg_reward',
+    'car_test_std',
+    'car_inference_time_ms',                 
+    'car_vs_attacker_reward',
+    'car_vs_attacker_std',
+    'offpolicy_greedy_train_avg_reward',
+    'offpolicy_greedy_train_std',
+    'offpolicy_greedy_test_avg_reward',      
+    'offpolicy_greedy_test_std',
+    'offpolicy_greedy_inference_time_ms',
+    'offpolicy_greedy_vs_attacker_reward',
+    'offpolicy_greedy_vs_attacker_std',
+    'performance_diff_offpolicy_vs_pessimistic',
+    'performance_diff_offpolicy_vs_car',
+    'performance_diff_car_vs_pessimistic',
+    'speedup_offpolicy_vs_pessimistic',
+    'speedup_offpolicy_vs_car',
+]
     
     # Add timestamp
     results_dict['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1035,18 +1443,16 @@ def check_experiment_progress(csv_filename='gridworld_experiments.csv',
         print(f"  Experiments completed: {completed}/{total_experiments} ({completed/total_experiments*100:.1f}%)")
         print(f"  Last experiment: {df['experiment_number'].max()}")
         
-        # Quick stats
-        if completed > 0:
-            print(f"\n  Current Win Distribution:")
-            print(f"    Pessimistic: {(df['winner'] == 'PESSIMISTIC').sum()} ({(df['winner'] == 'PESSIMISTIC').sum()/completed*100:.1f}%)")
-            print(f"    CAR:         {(df['winner'] == 'CAR').sum()} ({(df['winner'] == 'CAR').sum()/completed*100:.1f}%)")
-            print(f"    Ties:        {(df['winner'] == 'TIE').sum()} ({(df['winner'] == 'TIE').sum()/completed*100:.1f}%)")
             
-            print(f"\n  Average Rewards:")
-            print(f"    Pessimistic: {df['pessimistic_test_avg_reward'].mean():.2f}")
-            print(f"    CAR:         {df['car_test_avg_reward'].mean():.2f}")
+        print(f"\n  Average Rewards:")
+        if 'pessimistic_test_avg_reward' in df.columns:
+                print(f"    Pessimistic: {df['pessimistic_test_avg_reward'].mean():.2f}")
+        if 'car_test_avg_reward' in df.columns:
+                print(f"    CAR:         {df['car_test_avg_reward'].mean():.2f}")
+        if 'offpolicy_greedy_test_avg_reward' in df.columns:
+                print(f"    Off-Policy:  {df['offpolicy_greedy_test_avg_reward'].mean():.2f}")
     else:
-        print(f"\n⚠️  No CSV file found: {csv_filename}")
+        print(f"\n  No CSV file found: {csv_filename}")
         completed = 0
     
     # Check checkpoint
@@ -1055,8 +1461,8 @@ def check_experiment_progress(csv_filename='gridworld_experiments.csv',
         last_completed = load_checkpoint(checkpoint_file)
         print(f"  Next experiment will be: {last_completed + 1}")
     else:
-        print(f"⚠️  No checkpoint file found: {checkpoint_file}")
-        print(f"  Starting fresh if you run main()")
+        print(f" No checkpoint file found: {checkpoint_file}")
+        print(f"  Starting fresh if you run experiments")
     
     # Estimate time remaining
     if completed > 0:
@@ -1071,10 +1477,11 @@ def check_experiment_progress(csv_filename='gridworld_experiments.csv',
     
     return completed
 
-# NEW FUNCTION: Analyze CSV Results
+# NEW FUNCTION: Analyze CSV Results updated on Nov-25-2025
 def analyze_csv_results(csv_filename='gridworld_experiments.csv'):
     """
     Analyze and visualize results from the CSV file.
+    Updated Nov-27-2025 to handle 3 methods (Pessimistic, CAR, Off-Policy Greedy)
     """
     import pandas as pd
     import matplotlib.pyplot as plt
@@ -1088,324 +1495,381 @@ def analyze_csv_results(csv_filename='gridworld_experiments.csv'):
     
     # Summary statistics
     print("\n--- Pessimistic Q-Learning ---")
-    print(f"Mean test reward: {df['pessimistic_test_avg_reward'].mean():.2f} ± {df['pessimistic_test_avg_reward'].std():.2f}")
-    print(f"Mean vs attacker: {df['pessimistic_vs_attacker_reward'].mean():.2f} ± {df['pessimistic_vs_attacker_reward'].std():.2f}")
+    if 'pessimistic_clean_reward' in df.columns:
+      print(f"Mean test reward: {df['pessimistic_clean_reward'].mean():.2f} ± {df['pessimistic_clean_reward'].std():.2f}")
+    if 'pessimistic_vs_attacker_reward' in df.columns:
+      print(f"Mean vs attacker: {df['pessimistic_vs_attacker_reward'].mean():.2f} ± {df['pessimistic_vs_attacker_reward'].std():.2f}")
     
     print("\n--- CAR Operator ---")
-    print(f"Mean test reward: {df['car_test_avg_reward'].mean():.2f} ± {df['car_test_avg_reward'].std():.2f}")
-    print(f"Mean vs attacker: {df['car_vs_attacker_reward'].mean():.2f} ± {df['car_vs_attacker_reward'].std():.2f}")
+    if 'car_test_avg_reward' in df.columns:
+        print(f"Mean test reward: {df['car_test_avg_reward'].mean():.2f} ± {df['car_test_avg_reward'].std():.2f}")
+    if 'car_vs_attacker_reward' in df.columns:
+        print(f"Mean vs attacker: {df['car_vs_attacker_reward'].mean():.2f} ± {df['car_vs_attacker_reward'].std():.2f}")
     
-    print("\n--- Win Distribution ---")
-    print(df['winner'].value_counts())
+    # Check if off-policy columns exist
+    if 'offpolicy_greedy_test_avg_reward' in df.columns:
+        print("\n--- Off-Policy Greedy Target ---")
+        print(f"Mean test reward: {df['offpolicy_greedy_test_avg_reward'].mean():.2f} ± {df['offpolicy_greedy_test_avg_reward'].std():.2f}")
+        if 'offpolicy_greedy_vs_attacker_reward' in df.columns:
+            print(f"Mean vs attacker: {df['offpolicy_greedy_vs_attacker_reward'].mean():.2f} ± {df['offpolicy_greedy_vs_attacker_reward'].std():.2f}")
+        
+        print("\n--- Performance Comparisons ---")
+        if 'performance_diff_offpolicy_vs_pessimistic' in df.columns:
+            print(f"Off-Policy vs Pessimistic: {df['performance_diff_offpolicy_vs_pessimistic'].mean():.3f}")
+        if 'performance_diff_offpolicy_vs_car' in df.columns:
+            print(f"Off-Policy vs CAR:         {df['performance_diff_offpolicy_vs_car'].mean():.3f}")
+        if 'performance_diff_car_vs_pessimistic' in df.columns:
+            print(f"CAR vs Pessimistic:        {df['performance_diff_car_vs_pessimistic'].mean():.3f}")
     
-    # Create visualizations
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # Plot 1: Test rewards comparison
-    axes[0, 0].hist(df['pessimistic_test_avg_reward'], alpha=0.5, label='Pessimistic', bins=30)
-    axes[0, 0].hist(df['car_test_avg_reward'], alpha=0.5, label='CAR', bins=30)
-    axes[0, 0].set_xlabel('Test Reward')
-    axes[0, 0].set_ylabel('Frequency')
-    axes[0, 0].set_title('Test Reward Distribution')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # Plot 2: Performance difference over experiments
-    axes[0, 1].plot(df['experiment_number'], df['performance_difference'])
-    axes[0, 1].axhline(y=0, color='r', linestyle='--', alpha=0.5)
-    axes[0, 1].set_xlabel('Experiment Number')
-    axes[0, 1].set_ylabel('Performance Difference (CAR - Pessimistic)')
-    axes[0, 1].set_title('Performance Difference Over Experiments')
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Plot 3: Rewards vs attacker
-    axes[1, 0].hist(df['pessimistic_vs_attacker_reward'], alpha=0.5, label='Pessimistic', bins=30)
-    axes[1, 0].hist(df['car_vs_attacker_reward'], alpha=0.5, label='CAR', bins=30)
-    axes[1, 0].set_xlabel('Reward vs Attacker')
-    axes[1, 0].set_ylabel('Frequency')
-    axes[1, 0].set_title('Performance Against Trained Attacker')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # Plot 4: Scatter plot
-    axes[1, 1].scatter(df['pessimistic_test_avg_reward'], df['car_test_avg_reward'], alpha=0.5)
-    axes[1, 1].plot([df['pessimistic_test_avg_reward'].min(), df['pessimistic_test_avg_reward'].max()],
-                     [df['pessimistic_test_avg_reward'].min(), df['pessimistic_test_avg_reward'].max()],
-                     'r--', alpha=0.5, label='Equal performance')
-    axes[1, 1].set_xlabel('Pessimistic Test Reward')
-    axes[1, 1].set_ylabel('CAR Test Reward')
-    axes[1, 1].set_title('Direct Comparison')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True, alpha=0.3)
-    
-    #plt.tight_layout()
-    #plt.savefig('experiment_analysis.png', dpi=300, bbox_inches='tight')
-    #print(f"\n✓ Analysis plot saved to: experiment_analysis.png")
-    #plt.show()
+    # Simple summary print - no plots for now
+    print("\n" + "="*70)
+    print("Analysis complete!")
+    print("="*70)
     
     return df
 
-# MAIN FUNCTION with Pause/Resume
-def main(num_experiments=500, save_csv=True, csv_filename='gridworld_experiments.csv', 
-         checkpoint_file='experiment_checkpoint.pkl', resume=True):
+def run_single_experiment_with_seed(experiment_num, seed, attack_models=None):
     """
-    Run multiple experiments comparing CAR operator vs Pessimistic Q-Learning.
-    Supports pausing and resuming experiments.
+    Run ONE complete experiment with fixed random seed for fair comparison.
+    Tests all three algorithms (Off-Policy, Pessimistic, CAR) with same initial conditions.
     
-    Parameters:
-    -----------
-    num_experiments : int
-        Total number of experiments to run (default: 500)
-    save_csv : bool
-        Whether to save results to CSV (default: True)
-    csv_filename : str
-        Name of CSV file to save results
-    checkpoint_file : str
-        Name of checkpoint file for pause/resume functionality
-    resume : bool
-        If True, resume from last checkpoint if it exists (default: True)
+    Args:
+        experiment_num: Experiment number (for tracking)
+        seed: Random seed to ensure reproducibility
+        attack_models: Dict with keys 'offpolicy', 'pessimistic', 'car' 
+                      containing trained attacker models (optional)
+    
+    Returns:
+        results: Dict containing all test results
+        agentQ1: Trained Off-Policy agent
+        agentQ2: Trained Pessimistic agent  
+        agentQ3: Trained CAR agent
     """
-    import os
+    results = {}
+    results['experiment_number'] = experiment_num
+    results['seed'] = seed
     
-    # Track if user requested pause
-    pause_requested = False
+    # ============================================================
+    # PHASE 1: BASELINE TRAINING (Same for all three algorithms)
+    # ============================================================
+    print(f"\n[Exp {experiment_num}] Phase 1: Baseline training...")
     
-    def signal_handler(sig, frame):
-        """Handle Ctrl+C gracefully"""
-        nonlocal pause_requested
-        print("\n" + "="*70)
-        print("PAUSE REQUESTED - Will stop after current experiment completes")
-        print("="*70)
-        pause_requested = True
+    environment_baseline = GridWorld()
+    environment_baseline.seed(seed)
+    agent_baseline = Q_Agent(environment_baseline)
     
-    # Register the signal handler for Ctrl+C
-    signal.signal(signal.SIGINT, signal_handler)
+    # Set numpy random seed for reproducibility (offset to avoid correlation)
+    np.random.seed(seed + 1000)
     
-    print("="*70)
-    print(f"RUNNING UP TO {num_experiments} EXPERIMENTS")
-    print("Comparing CAR Operator vs Pessimistic Q-Learning with Belief")
-    print("="*70)
-    print(f"\nResults will be saved to: {csv_filename}")
-    print(f"Checkpoint file: {checkpoint_file}")
-    print(f"\n⚠️  Press Ctrl+C at any time to pause (will finish current experiment)")
-    print("="*70)
+    # Train baseline with vanilla Q-learning
+    reward_baseline = play(environment_baseline, agent_baseline, trials=2000, learn=True)
+    results['baseline_avg_reward'] = np.mean(reward_baseline[-100:])
     
-    # Determine starting experiment number
-    if resume:
-        start_experiment = load_checkpoint(checkpoint_file) + 1
-        if start_experiment > 1:
-            response = input(f"\nResume from experiment {start_experiment}? (y/n): ").lower()
-            if response != 'y':
-                print("Starting from experiment 1 (checkpoint will be overwritten)")
-                start_experiment = 1
-    else:
-        start_experiment = 1
-        print("Resume disabled - starting from experiment 1")
+    # Store baseline Q-table to initialize all three algorithms
+    baseline_q_table = copy.deepcopy(agent_baseline.q_table)
     
-    # Store summary statistics across all experiments
-    all_pessimistic_rewards = []
-    all_car_rewards = []
-    pessimistic_wins = 0
-    car_wins = 0
-    ties = 0
+    # ============================================================
+    # PHASE 2: OFF-POLICY GREEDY TARGET
+    # ============================================================
+    print(f"[Exp {experiment_num}] Phase 2: Training Off-Policy Greedy...")
     
-    # Main experiment loop
-    for exp_num in range(start_experiment, num_experiments + 1):
-        
-        # Check if pause was requested
-        if pause_requested:
-            print("\n" + "="*70)
-            print("PAUSING EXPERIMENTS")
-            print("="*70)
-            print(f"Completed up to experiment {exp_num - 1}")
-            print(f"Checkpoint saved to: {checkpoint_file}")
-            print(f"\nTo resume later, run:")
-            print(f"  main(num_experiments={num_experiments}, resume=True)")
-            print("="*70)
-            return {
-                'status': 'PAUSED',
-                'last_completed': exp_num - 1,
-                'total_experiments': num_experiments,
-                'checkpoint_file': checkpoint_file,
-                'csv_filename': csv_filename
-            }
-        
-        print(f"\n{'='*70}")
-        print(f"EXPERIMENT {exp_num}/{num_experiments}")
-        print(f"Progress: {(exp_num-1)/num_experiments*100:.1f}% complete")
-        print(f"{'='*70}")
-        
-        # Dictionary to store results for this experiment
-        results = {}
-        
-        try:
-            # ========== APPROACH 1: PESSIMISTIC Q-LEARNING WITH BELIEF ==========
-            print(f"\n[Exp {exp_num}] Training YOUR Pessimistic Q-Learning...")
-            
-            environment1 = GridWorld()
-            agentQ1 = Q_Agent(environment1)
-            
-            # Train baseline
-            reward_baseline1 = play(environment1, agentQ1, trials=2000, learn=True)
-            results['baseline1_avg_reward'] = np.mean(reward_baseline1[-100:])
-            
-            # Train with pessimistic approach
-            reward_train1 = play_att_with_belief(environment1, agentQ1, trials=500, learn=True)
-            results['pessimistic_train_avg_reward'] = np.mean(reward_train1)
-            results['pessimistic_train_std'] = np.std(reward_train1)
-            
-            # Test without attacks
-            reward_test1 = play_att_with_belief(environment1, agentQ1, trials=100, learn=False, attack_model=None)
-            results['pessimistic_test_avg_reward'] = np.mean(reward_test1)
-            results['pessimistic_test_std'] = np.std(reward_test1)
-            
-            print(f"  ✓ Pessimistic - Test reward: {results['pessimistic_test_avg_reward']:.2f}")
-            
-            # ========== APPROACH 2: CAR OPERATOR ==========
-            print(f"\n[Exp {exp_num}] Training CAR Operator...")
-            
-            environment2 = GridWorld()
-            agentQ2 = Q_Agent(environment2)
-            
-            # Train baseline
-            reward_baseline2 = play(environment2, agentQ2, trials=2000, learn=True)
-            results['baseline2_avg_reward'] = np.mean(reward_baseline2[-100:])
-            
-            # Train with CAR operator
-            reward_train2 = play_with_car_operator(environment2, agentQ2, trials=500, learn=True)
-            results['car_train_avg_reward'] = np.mean(reward_train2)
-            results['car_train_std'] = np.std(reward_train2)
-            
-            # Test without attacks
-            reward_test2 = play_with_car_operator(environment2, agentQ2, trials=100, learn=False)
-            results['car_test_avg_reward'] = np.mean(reward_test2)
-            results['car_test_std'] = np.std(reward_test2)
-            
-            print(f"  ✓ CAR operator - Test reward: {results['car_test_avg_reward']:.2f}")
-            
-            # ========== TEST WITH TRAINED ATTACKER ==========
-            print(f"\n[Exp {exp_num}] Testing against trained attacker...")
-            
-            # Train attacker on pessimistic agent
-            attack_model = train_RL_attack_with_belief(agentQ1)
-            
-            # Test pessimistic vs attacker
-            reward_pessimistic_vs_attacker = play_att_with_belief(
-                environment1, agentQ1, trials=100, learn=False, attack_model=attack_model
-            )
-            results['pessimistic_vs_attacker_reward'] = np.mean(reward_pessimistic_vs_attacker)
-            results['pessimistic_vs_attacker_std'] = np.std(reward_pessimistic_vs_attacker)
-            
-            # Test CAR vs attacker
-            reward_car_vs_attacker = play_with_car_operator(
-                environment2, agentQ2, trials=100, learn=False
-            )
-            results['car_vs_attacker_reward'] = np.mean(reward_car_vs_attacker)
-            results['car_vs_attacker_std'] = np.std(reward_car_vs_attacker)
-            
-            # ========== DETERMINE WINNER ==========
-            pessimistic_score = results['pessimistic_test_avg_reward']
-            car_score = results['car_test_avg_reward']
-            performance_diff = car_score - pessimistic_score
-            
-            results['performance_difference'] = performance_diff
-            
-            if abs(performance_diff) < 0.01:  # Essentially tied
-                results['winner'] = 'TIE'
-                ties += 1
-                print(f"\n  → Result: TIE (diff: {performance_diff:.3f})")
-            elif performance_diff > 0:
-                results['winner'] = 'CAR'
-                car_wins += 1
-                print(f"\n  → Result: CAR WINS by {performance_diff:.2f}")
-            else:
-                results['winner'] = 'PESSIMISTIC'
-                pessimistic_wins += 1
-                print(f"\n  → Result: PESSIMISTIC WINS by {abs(performance_diff):.2f}")
-            
-            # Store for overall statistics
-            all_pessimistic_rewards.append(pessimistic_score)
-            all_car_rewards.append(car_score)
-            
-            # ========== LOG TO CSV ==========
-            if save_csv:
-                log_experiment_to_csv(exp_num, results, filename=csv_filename)
-            
-            # ========== SAVE CHECKPOINT ==========
-            save_checkpoint(exp_num, checkpoint_file=checkpoint_file)
-            
-        except Exception as e:
-            print(f"\n⚠️  ERROR in experiment {exp_num}: {e}")
-            print(f"Checkpoint saved at experiment {exp_num - 1}")
-            print(f"You can resume from this point later.")
-            raise e
-        
-        # ========== PROGRESS UPDATE ==========
-        if exp_num % 10 == 0 or exp_num == num_experiments:
-            elapsed_exp = exp_num - start_experiment + 1
-            print(f"\n{'='*70}")
-            print(f"PROGRESS UPDATE - Completed {exp_num}/{num_experiments} experiments")
-            print(f"{'='*70}")
-            print(f"Pessimistic wins: {pessimistic_wins} ({pessimistic_wins/elapsed_exp*100:.1f}%)")
-            print(f"CAR wins:         {car_wins} ({car_wins/elapsed_exp*100:.1f}%)")
-            print(f"Ties:             {ties} ({ties/elapsed_exp*100:.1f}%)")
-            print(f"{'='*70}")
+    # Create new environment with SAME seed
+    environment1 = GridWorld()
+    environment1.seed(seed)
+    agentQ1 = Q_Agent(environment1)
+    agentQ1.q_table = copy.deepcopy(baseline_q_table)
     
-    # ========== ALL EXPERIMENTS COMPLETE ==========
-    print("\n" + "="*70)
-    print("ALL EXPERIMENTS COMPLETE!")
-    print("="*70)
+    # Train Off-Policy with same random seed (offset)
+    np.random.seed(seed + 1000)
+    reward_train1 = play_offpolicy_greedy_target(environment1, agentQ1, trials=500, learn=True)
+    results['offpolicy_greedy_train_avg_reward'] = np.mean(reward_train1)
+    results['offpolicy_greedy_train_std'] = np.std(reward_train1)
     
-    # Clear checkpoint since we're done
-    clear_checkpoint(checkpoint_file)
+    # Test WITHOUT attacker
+    np.random.seed(seed + 1000)  # Reset for consistent testing
+    reward_test1, offpolicy_time = play_offpolicy_greedy_target(
+        environment1, agentQ1, trials=100, learn=False, measure_time=True
+    )
+    results['offpolicy_greedy_test_avg_reward'] = np.mean(reward_test1)
+    results['offpolicy_greedy_test_std'] = np.std(reward_test1)
+    results['offpolicy_greedy_inference_time_ms'] = offpolicy_time * 1000
     
-    # ========== FINAL SUMMARY ==========
-    print(f"\nTotal experiments: {num_experiments}")
-    print(f"\nWin Distribution:")
-    print(f"  Pessimistic Q-Learning wins: {pessimistic_wins} ({pessimistic_wins/num_experiments*100:.1f}%)")
-    print(f"  CAR Operator wins:           {car_wins} ({car_wins/num_experiments*100:.1f}%)")
-    print(f"  Ties:                        {ties} ({ties/num_experiments*100:.1f}%)")
+    # Test WITH attacker (if available)
+    if attack_models is not None and 'offpolicy' in attack_models:
+        np.random.seed(seed + 1000)  # Reset for consistent testing
+        reward_test1_attack = play_offpolicy_greedy_target(
+            environment1, agentQ1, trials=100, learn=False, 
+            attack_model=attack_models['offpolicy']
+        )
+        results['offpolicy_greedy_vs_attacker_reward'] = np.mean(reward_test1_attack)
+        results['offpolicy_greedy_vs_attacker_std'] = np.std(reward_test1_attack)
     
-    print(f"\nOverall Performance:")
-    print(f"  Pessimistic Q-Learning:")
-    print(f"    Mean reward: {np.mean(all_pessimistic_rewards):.2f}")
-    print(f"    Std dev:     {np.std(all_pessimistic_rewards):.2f}")
-    print(f"    Min reward:  {np.min(all_pessimistic_rewards):.2f}")
-    print(f"    Max reward:  {np.max(all_pessimistic_rewards):.2f}")
+    # ============================================================
+    # PHASE 3: PESSIMISTIC Q-LEARNING
+    # ============================================================
+    print(f"[Exp {experiment_num}] Phase 3: Training Pessimistic Q-Learning...")
     
-    print(f"\n  CAR Operator:")
-    print(f"    Mean reward: {np.mean(all_car_rewards):.2f}")
-    print(f"    Std dev:     {np.std(all_car_rewards):.2f}")
-    print(f"    Min reward:  {np.min(all_car_rewards):.2f}")
-    print(f"    Max reward:  {np.max(all_car_rewards):.2f}")
+    # Create new environment with SAME seed
+    environment2 = GridWorld()
+    environment2.seed(seed)
+    agentQ2 = Q_Agent(environment2)
+    agentQ2.q_table = copy.deepcopy(baseline_q_table)
     
-    avg_difference = np.mean(all_car_rewards) - np.mean(all_pessimistic_rewards)
-    print(f"\nAverage performance difference: {avg_difference:.3f}")
+    # Train Pessimistic with same random seed (offset)
+    np.random.seed(seed + 1000)
+    reward_train2 = play_att_with_belief(environment2, agentQ2, trials=500, learn=True)
+    results['pessimistic_train_avg_reward'] = np.mean(reward_train2)
+    results['pessimistic_train_std'] = np.std(reward_train2)
     
-    if abs(avg_difference) < 0.01:
-        print("→ Overall: Methods perform EQUALLY")
-    elif avg_difference > 0:
-        print(f"→ Overall: CAR Operator performs BETTER (by {avg_difference:.2f})")
-    else:
-        print(f"→ Overall: Pessimistic Q-Learning performs BETTER (by {abs(avg_difference):.2f})")
+   # Test in CLEAN environment (NO attacker) - NEW!
+    np.random.seed(seed + 1000)  # Reset for consistent testing
+    reward_clean2, pessimistic_clean_time = play_pessimistic_clean(
+    environment2, agentQ2, trials=100, measure_time=True)
+    results['pessimistic_clean_reward'] = np.mean(reward_clean2)
+    results['pessimistic_clean_std'] = np.std(reward_clean2)
+    results['pessimistic_clean_inference_time_ms'] = pessimistic_clean_time * 1000
     
-    if save_csv:
-        print(f"\n✓ All results saved to: {csv_filename}")
+    # Test WITH attacker (if available)
+    if attack_models is not None and 'pessimistic' in attack_models:
+        np.random.seed(seed + 1000)  # Reset for consistent testing
+        reward_test2_attack = play_att_with_belief(
+            environment2, agentQ2, trials=100, learn=False,
+            attack_model=attack_models['pessimistic']
+        )
+        results['pessimistic_vs_attacker_reward'] = np.mean(reward_test2_attack)
+        results['pessimistic_vs_attacker_std'] = np.std(reward_test2_attack)
     
-    print("="*70)
-    print("EXPERIMENT COMPLETE")
-    print("="*70)
+    # ============================================================
+    # PHASE 4: CAR OPERATOR
+    # ============================================================
+    print(f"[Exp {experiment_num}] Phase 4: Training CAR Operator...")
     
-    return {
-        'status': 'COMPLETE',
-        'pessimistic_rewards': all_pessimistic_rewards,
-        'car_rewards': all_car_rewards,
-        'pessimistic_wins': pessimistic_wins,
-        'car_wins': car_wins,
-        'ties': ties,
-        'csv_filename': csv_filename
-    }
+    # Create new environment with SAME seed
+    environment3 = GridWorld()
+    environment3.seed(seed)
+    agentQ3 = Q_Agent(environment3)
+    agentQ3.q_table = copy.deepcopy(baseline_q_table)
+    
+    # Train CAR with same random seed (offset)
+    np.random.seed(seed + 1000)
+    reward_train3 = play_with_car_operator(environment3, agentQ3, trials=500, learn=True)
+    results['car_train_avg_reward'] = np.mean(reward_train3)
+    results['car_train_std'] = np.std(reward_train3)
+    
+    # Test WITHOUT attacker
+    np.random.seed(seed + 1000)  # Reset for consistent testing
+    reward_test3, car_time = play_with_car_operator(
+        environment3, agentQ3, trials=100, learn=False, measure_time=True
+    )
+    results['car_test_avg_reward'] = np.mean(reward_test3)
+    results['car_test_std'] = np.std(reward_test3)
+    results['car_inference_time_ms'] = car_time * 1000
+    
+    # Test WITH attacker (if available)
+    if attack_models is not None and 'car' in attack_models:
+        np.random.seed(seed + 1000)  # Reset for consistent testing
+        reward_test3_attack = play_with_car_operator(
+            environment3, agentQ3, trials=100, learn=False,
+            attack_model=attack_models['car']
+        )
+        results['car_vs_attacker_reward'] = np.mean(reward_test3_attack)
+        results['car_vs_attacker_std'] = np.std(reward_test3_attack)
+    
+    # ============================================================
+# PHASE 5: CALCULATE PERFORMANCE METRICS
+# ============================================================
+    
+# Performance differences 
+    results['performance_diff_car_vs_pessimistic'] = results['car_test_avg_reward'] - results['pessimistic_clean_reward']
+    results['performance_diff_offpolicy_vs_pessimistic'] = results['offpolicy_greedy_test_avg_reward'] - results['pessimistic_clean_reward']
+    results['performance_diff_offpolicy_vs_car'] = results['offpolicy_greedy_test_avg_reward'] - results['car_test_avg_reward']
+    
+# Speedup calculations
+    if results['pessimistic_clean_inference_time_ms'] > 0:
+        results['speedup_offpolicy_vs_pessimistic'] = results['pessimistic_clean_inference_time_ms'] / results['offpolicy_greedy_inference_time_ms']
+    if results['car_inference_time_ms'] > 0:
+        results['speedup_offpolicy_vs_car'] = results['car_inference_time_ms'] / results['offpolicy_greedy_inference_time_ms']
 
+    print(f"[Exp {experiment_num}] Complete!")
+    print(f"  Off-Policy:  {results['offpolicy_greedy_test_avg_reward']:.2f}")
+    print(f"  Pessimistic: {results['pessimistic_clean_reward']:.2f}")  
+    print(f"  CAR:         {results['car_test_avg_reward']:.2f}")
+    
+    return results, agentQ1, agentQ2, agentQ3
+    
+def visualize_experiment_results(csv_filename='gridworld_experiments.csv'):
+    """
+    Create comprehensive visualizations from experiment CSV results.
+    
+    Creates:
+        - Distribution histograms (3 plots)
+        - Box plot comparison
+        - Cumulative distribution function
+        - Scatter plot over experiments
+        - Saves as 'experiment_visualizations.png'
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    try:
+        import seaborn as sns
+        sns.set_style("whitegrid")
+    except ImportError:
+        print("Warning: seaborn not installed, using default matplotlib style")
+    
+    # Read CSV
+    try:
+        df = pd.read_csv(csv_filename)
+    except FileNotFoundError:
+        print(f"Error: {csv_filename} not found!")
+        return None
+    
+    # Check if required columns exist
+    # Check if required columns exist
+    required_cols = ['offpolicy_greedy_test_avg_reward', 'pessimistic_clean_reward', 'car_test_avg_reward']
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        print(f"Error: CSV missing columns: {missing}")
+        print("This CSV may be from an old experiment format.")
+        return None
+    
+    print(f"\n{'='*70}")
+    print(f"VISUALIZING {len(df)} EXPERIMENTS")
+    print(f"File: {csv_filename}")
+    print(f"{'='*70}")
+    
+    # Extract test rewards (without attacker)
+    offpolicy_rewards = df['offpolicy_greedy_test_avg_reward'].values
+    pessimistic_rewards = df['pessimistic_clean_reward'].values
+    car_rewards = df['car_test_avg_reward'].values
+    
+    # Create comprehensive figure
+    fig = plt.figure(figsize=(16, 12))
+    
+    # ========== PLOT 1: Off-Policy Distribution ==========
+    ax1 = plt.subplot(2, 3, 1)
+    ax1.hist(offpolicy_rewards, bins=50, color='green', alpha=0.7, edgecolor='black')
+    ax1.axvline(np.mean(offpolicy_rewards), color='darkgreen', linestyle='--', linewidth=2,
+                label=f'Mean: {np.mean(offpolicy_rewards):.2f}')
+    ax1.axvline(np.median(offpolicy_rewards), color='lime', linestyle=':', linewidth=2,
+                label=f'Median: {np.median(offpolicy_rewards):.2f}')
+    ax1.set_title('Off-Policy Greedy Distribution', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Test Reward')
+    ax1.set_ylabel('Frequency')
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+    
+    # ========== PLOT 2: Pessimistic Distribution ==========
+    ax2 = plt.subplot(2, 3, 2)
+    ax2.hist(pessimistic_rewards, bins=50, color='blue', alpha=0.7, edgecolor='black')
+    ax2.axvline(np.mean(pessimistic_rewards), color='darkblue', linestyle='--', linewidth=2,
+                label=f'Mean: {np.mean(pessimistic_rewards):.2f}')
+    ax2.axvline(np.median(pessimistic_rewards), color='cyan', linestyle=':', linewidth=2,
+                label=f'Median: {np.median(pessimistic_rewards):.2f}')
+    ax2.set_title('Pessimistic Q-Learning Distribution', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Test Reward')
+    ax2.set_ylabel('Frequency')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+    
+    # ========== PLOT 3: CAR Distribution ==========
+    ax3 = plt.subplot(2, 3, 3)
+    ax3.hist(car_rewards, bins=50, color='red', alpha=0.7, edgecolor='black')
+    ax3.axvline(np.mean(car_rewards), color='darkred', linestyle='--', linewidth=2,
+                label=f'Mean: {np.mean(car_rewards):.2f}')
+    ax3.axvline(np.median(car_rewards), color='orange', linestyle=':', linewidth=2,
+                label=f'Median: {np.median(car_rewards):.2f}')
+    ax3.set_title('CAR Operator Distribution (High Variance)', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('Test Reward')
+    ax3.set_ylabel('Frequency')
+    ax3.legend()
+    ax3.grid(alpha=0.3)
+    
+    # ========== PLOT 4: Box Plot Comparison ==========
+    ax4 = plt.subplot(2, 3, 4)
+    data = [offpolicy_rewards, pessimistic_rewards, car_rewards]
+    labels = ['Off-Policy', 'Pessimistic', 'CAR']
+    bp = ax4.boxplot(data, labels=labels, patch_artist=True, showfliers=True)
+    bp['boxes'][0].set_facecolor('lightgreen')
+    bp['boxes'][1].set_facecolor('lightblue')
+    bp['boxes'][2].set_facecolor('lightcoral')
+    ax4.axhline(y=5.0, color='black', linestyle=':', linewidth=2, label='Success Threshold (5.0)')
+    ax4.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+    ax4.set_ylabel('Test Reward')
+    ax4.set_title('Performance Comparison (Box Plot)', fontsize=12, fontweight='bold')
+    ax4.legend()
+    ax4.grid(alpha=0.3)
+    
+    # ========== PLOT 5: Cumulative Distribution Function ==========
+    ax5 = plt.subplot(2, 3, 5)
+    sorted_offpolicy = np.sort(offpolicy_rewards)
+    sorted_pessimistic = np.sort(pessimistic_rewards)
+    sorted_car = np.sort(car_rewards)
+    n = len(df)
+    ax5.plot(sorted_offpolicy, np.arange(1, n+1)/n, label='Off-Policy', 
+             color='green', linewidth=2)
+    ax5.plot(sorted_pessimistic, np.arange(1, n+1)/n, label='Pessimistic', 
+             color='blue', linewidth=2)
+    ax5.plot(sorted_car, np.arange(1, n+1)/n, label='CAR', 
+             color='red', linewidth=2)
+    ax5.axvline(x=5.0, color='black', linestyle=':', linewidth=2, label='Success Threshold')
+    ax5.set_xlabel('Test Reward')
+    ax5.set_ylabel('Cumulative Probability')
+    ax5.set_title('Cumulative Distribution (Shows CAR Bimodal)', fontsize=12, fontweight='bold')
+    ax5.legend()
+    ax5.grid(alpha=0.3)
+    
+    # ========== PLOT 6: Scatter Over Experiments ==========
+    ax6 = plt.subplot(2, 3, 6)
+    experiments = np.arange(1, n+1)
+    ax6.scatter(experiments, offpolicy_rewards, alpha=0.6, s=15, color='green', label='Off-Policy')
+    ax6.scatter(experiments, pessimistic_rewards, alpha=0.6, s=15, color='blue', label='Pessimistic')
+    ax6.scatter(experiments, car_rewards, alpha=0.6, s=15, color='red', label='CAR')
+    ax6.axhline(y=5.0, color='black', linestyle=':', linewidth=2, label='Success Threshold')
+    ax6.axhline(y=0, color='gray', linestyle='-', linewidth=1, alpha=0.5)
+    ax6.set_xlabel('Experiment Number')
+    ax6.set_ylabel('Test Reward')
+    ax6.set_title('Rewards Across All Experiments', fontsize=12, fontweight='bold')
+    ax6.legend()
+    ax6.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('experiment_visualizations.png', dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved visualization to: experiment_visualizations.png")
+    plt.show()
+    
+    # ========== Print Statistics ==========
+    print("\n" + "="*70)
+    print("STATISTICS SUMMARY")
+    print("="*70)
+    
+    print(f"\nOff-Policy Greedy:")
+    print(f"  Mean:    {np.mean(offpolicy_rewards):7.2f} ± {np.std(offpolicy_rewards):.2f}")
+    print(f"  Median:  {np.median(offpolicy_rewards):7.2f}")
+    print(f"  Min:     {np.min(offpolicy_rewards):7.2f}")
+    print(f"  Max:     {np.max(offpolicy_rewards):7.2f}")
+    success_rate = np.sum(offpolicy_rewards > 5) / n * 100
+    print(f"  Success: {np.sum(offpolicy_rewards > 5)}/{n} ({success_rate:.1f}%)")
+    
+    print(f"\nPessimistic Q-Learning:")
+    print(f"  Mean:    {np.mean(pessimistic_rewards):7.2f} ± {np.std(pessimistic_rewards):.2f}")
+    print(f"  Median:  {np.median(pessimistic_rewards):7.2f}")
+    print(f"  Min:     {np.min(pessimistic_rewards):7.2f}")
+    print(f"  Max:     {np.max(pessimistic_rewards):7.2f}")
+    success_rate = np.sum(pessimistic_rewards > 5) / n * 100
+    print(f"  Success: {np.sum(pessimistic_rewards > 5)}/{n} ({success_rate:.1f}%)")
+    
+    print(f"\nCAR Operator:")
+    print(f"  Mean:    {np.mean(car_rewards):7.2f} ± {np.std(car_rewards):.2f}")
+    print(f"  Median:  {np.median(car_rewards):7.2f}")
+    print(f"  Min:     {np.min(car_rewards):7.2f}")
+    print(f"  Max:     {np.max(car_rewards):7.2f}")
+    success_rate = np.sum(car_rewards > 5) / n * 100
+    print(f"  Success: {np.sum(car_rewards > 5)}/{n} ({success_rate:.1f}%)")
+    
+    print("\n" + "="*70)
+    
+    return df
 
 # ============================================================================
 # EXECUTION SECTION
@@ -1414,92 +1878,272 @@ def main(num_experiments=500, save_csv=True, csv_filename='gridworld_experiments
 if __name__ == "__main__":
     
     print("\n" + "="*70)
-    print("GRIDWORLD WITH CAR OPERATOR")
-    print("Comparing Pessimistic Q-Learning vs CAR Operator")
+    print("GRIDWORLD REINFORCEMENT LEARNING EXPERIMENTS")
+    print("Comparing: Off-Policy Greedy vs Pessimistic Q-Learning vs CAR Operator")
     print("="*70)
     print("\nChoose an option:")
-    print("  1. Quick test (5 experiments)")
-    print("  2. Medium test (50 experiments)")
-    print("  3. Full experiment (500 experiments)")
-    print("  4. Check progress of existing experiments")
+    print("  1. Quick test (5 experiments,)")
+    print("  2. Medium test (50 experiments,)")
+    print("  3. Full test (500 experiments,)")
+    print()
+    print("  4. Train attackers (one-time setup)")
+    print("  5. Analyze existing results")
+    print("  6. Visualize existing results")
+    print("  7. Check progress")
     print("="*70)
     
-    choice = input("\nEnter your choice (1-4): ").strip()
+    choice = input("\nEnter your choice (1-7): ").strip()
     
-    if choice == '1':
-        # ========== OPTION 1: Quick Test (5 experiments) ==========
-        print("\n" + "="*70)
-        print("QUICK TEST - 5 EXPERIMENTS")
-        print("="*70)
-        print("This will take approximately 1 hour")
-        print("Press Ctrl+C at any time to pause\n")
+    if choice in ['1', '2', '3']:
+        # ========== OPTIONS 1-3: Run Experiments ==========
+        if choice == '1':
+            num_experiments = 5
+            csv_filename = 'gridworld_test_5runs.csv'
+            checkpoint_file = 'test_checkpoint.pkl'
+            est_time = "~5 minutes"
+        elif choice == '2':
+            num_experiments = 50
+            csv_filename = 'gridworld_medium_50runs.csv'
+            checkpoint_file = 'medium_checkpoint.pkl'
+            est_time = "~20 minutes"
+        else:  # choice == '3'
+            num_experiments = 500
+            csv_filename = 'gridworld_experiments_500runs.csv'
+            checkpoint_file = 'experiment_checkpoint.pkl'
+            est_time = "~1 hour"
         
-        results = main(
-            num_experiments=5,
-            save_csv=True,
-            csv_filename='gridworld_test_5runs.csv',
-            checkpoint_file='test_checkpoint.pkl',
-            resume=True
-        )
+        print(f"\n{'='*70}")
+        print(f"RUNNING {num_experiments} EXPERIMENTS")
+        print(f"{'='*70}")
+        print(f"Estimated time: {est_time}")
+        print(f"Results will be saved to: {csv_filename}")
+        print(f"Press Ctrl+C at any time to pause")
+        print(f"{'='*70}\n")
         
-        if results['status'] == 'COMPLETE':
-            print("\n" + "="*70)
-            print("Test complete! Generating analysis...")
-            print("="*70)
-            df = analyze_csv_results('gridworld_test_5runs.csv')
+        import pandas as pd
+        import os
+        
+        # Check if attackers exist
+        attack_models = None
+        if os.path.exists('attacker_offpolicy.zip') and \
+           os.path.exists('attacker_pessimistic.zip') and \
+           os.path.exists('attacker_car.zip'):
+            use_attackers = input("Found trained attackers. Use for adversarial testing? (yes/no): ").lower()
+            if use_attackers == 'yes':
+                attack_models = {
+                    'offpolicy': DQN.load('attacker_offpolicy'),
+                    'pessimistic': DQN.load('attacker_pessimistic'),
+                    'car': DQN.load('attacker_car')
+                }
+                print("✓ Loaded attackers for all three algorithms")
+            else:
+                print("Running without attackers")
+        else:
+            print("No attackers found. Running without adversarial testing.")
+            print("(Use Option 4 to train attackers first)")
+        
+        # Check for existing progress
+        start_exp = 0
+        if os.path.exists(checkpoint_file):
+            resume = input(f"\nFound checkpoint. Resume from last completed experiment? (yes/no): ").lower()
+            if resume == 'yes':
+                start_exp = load_checkpoint(checkpoint_file)
+        
+        # Run experiments
+        all_results = []
+        for exp_num in range(start_exp, num_experiments):
+            print(f"\n{'='*70}")
+            print(f"EXPERIMENT {exp_num + 1}/{num_experiments}")
+            print(f"Using seed: {exp_num}")
+            print(f"{'='*70}")
+            
+            try:
+                # Run single experiment with fixed seed
+                results, agent1, agent2, agent3 = run_single_experiment_with_seed(
+                    experiment_num=exp_num,
+                    seed=exp_num,
+                    attack_models=attack_models
+                )
+                
+                all_results.append(results)
+                
+                # Log to CSV
+                log_experiment_to_csv(exp_num, results, filename=csv_filename)
+                
+                # Save checkpoint
+                save_checkpoint(exp_num, checkpoint_file=checkpoint_file)
+                
+                print(f"\n✓ Experiment {exp_num + 1} complete and saved")
+                
+            except KeyboardInterrupt:
+                print(f"\n\n{'='*70}")
+                print("PAUSED - Progress saved")
+                print(f"{'='*70}")
+                print(f"Completed: {exp_num}/{num_experiments} experiments")
+                print(f"Resume anytime by running this script again")
+                print(f"{'='*70}")
+                break
+            except Exception as e:
+                print(f"\n Error in experiment {exp_num}: {e}")
+                print(f"Progress saved. You can resume from experiment {exp_num + 1}")
+                raise e
+        
+        # Clear checkpoint if all complete
+        if exp_num == num_experiments - 1:
+            clear_checkpoint(checkpoint_file)
+            
+            print(f"\n{'='*70}")
+            print(f"ALL {num_experiments} EXPERIMENTS COMPLETE!")
+            print(f"{'='*70}")
+            print(f"\nResults saved to: {csv_filename}")
+            
+            # Auto-prompt for analysis
+            if input("\nGenerate analysis? (yes/no): ").lower() == 'yes':
+                analyze_csv_results(csv_filename)
+                
+                if input("\nGenerate visualizations? (yes/no): ").lower() == 'yes':
+                    visualize_experiment_results(csv_filename)
     
-    elif choice == '2':
-        # ========== OPTION 2: Medium Test (50 experiments) ==========
+    elif choice == '4':
+        # ========== OPTION 4: Train Attackers ==========
         print("\n" + "="*70)
-        print("MEDIUM TEST - 50 EXPERIMENTS")
+        print("TRAIN ATTACKERS")
         print("="*70)
-        print("This will take approximately 10 hours")
-        print("Press Ctrl+C at any time to pause\n")
+        print("\nThis will train 3 separate attackers:")
+        print("  1. Attacker vs Pessimistic Q-Learning")
+        print("  2. Attacker vs CAR Operator") 
+        print("  3. Attacker vs Off-Policy Greedy")
+        print("\nEach attacker will be trained for 200,000 timesteps.")
         
-        results = main(
-            num_experiments=50,
-            save_csv=True,
-            csv_filename='gridworld_medium_50runs.csv',
-            checkpoint_file='medium_checkpoint.pkl',
-            resume=True
-        )
         
-        if results['status'] == 'COMPLETE':
-            print("\n" + "="*70)
-            print("Experiments complete! Generating analysis...")
-            print("="*70)
-            df = analyze_csv_results('gridworld_medium_50runs.csv')
-    
-    elif choice == '3':
-        # ========== OPTION 3: Full Experiment (500 experiments) ==========
-        print("\n" + "="*70)
-        print("FULL EXPERIMENT - 500 EXPERIMENTS")
-        print("="*70)
-        print("⚠️  WARNING: This will take approximately 100 hours (4+ days)")
-        print("Press Ctrl+C at any time to pause")
-        print("Run this script again to resume from where you left off\n")
-        
-        confirm = input("Are you sure you want to start? (yes/no): ").lower()
+        confirm = input("Continue? (yes/no): ").lower()
         
         if confirm == 'yes':
-            results = main(
-                num_experiments=500,
-                save_csv=True,
-                csv_filename='gridworld_experiments_500runs.csv',
-                checkpoint_file='experiment_checkpoint.pkl',
-                resume=True
-            )
+            print("\n" + "="*70)
+            print("STEP 1: Training baseline agents to attack")
+            print("="*70)
             
-            if results['status'] == 'COMPLETE':
-                print("\n" + "="*70)
-                print("All experiments complete! Generating analysis...")
-                print("="*70)
-                df = analyze_csv_results('gridworld_experiments_500runs.csv')
+            # Set seed for reproducible attacker training
+            ATTACKER_TRAINING_SEED = 99999  # Use a different seed from testing (0-49)
+            
+            # Train Off-Policy agent  # ← Should align with line above
+            print("\n[1/3] Training Off-Policy agent...")
+            env1 = GridWorld()
+            env1.seed(ATTACKER_TRAINING_SEED)
+            np.random.seed(ATTACKER_TRAINING_SEED)
+            agent1 = Q_Agent(env1)
+            play(env1, agent1, trials=2000, learn=True)
+            play_offpolicy_greedy_target(env1, agent1, trials=500, learn=True)
+            print("✓ Off-Policy agent trained")
+            
+            # Train Pessimistic agent  # ← Same indentation
+            print("\n[2/3] Training Pessimistic agent...")
+            env2 = GridWorld()
+            env2.seed(ATTACKER_TRAINING_SEED + 1)
+            np.random.seed(ATTACKER_TRAINING_SEED + 1)
+            agent2 = Q_Agent(env2)
+            play(env2, agent2, trials=2000, learn=True)
+            play_att_with_belief(env2, agent2, trials=500, learn=True)
+            print("✓ Pessimistic agent trained")
+            
+            # Train CAR agent  # ← Same indentation
+            print("\n[3/3] Training CAR agent...")
+            env3 = GridWorld()
+            env3.seed(ATTACKER_TRAINING_SEED + 2)
+            np.random.seed(ATTACKER_TRAINING_SEED + 2)
+            agent3 = Q_Agent(env3)
+            play(env3, agent3, trials=2000, learn=True)
+            play_with_car_operator(env3, agent3, trials=500, learn=True)
+            print("✓ CAR agent trained")
+            
+            print("\n" + "="*70)  # ← Should align with lines above
+            
+            print("\n" + "="*70)
+            print("STEP 2: Training attackers against each agent")
+            print("="*70)
+            
+            # Train attackers
+            print("\n[1/3] Training attacker against Off-Policy...")
+            attack_offpolicy = train_RL_attack_with_belief(agent1, 'offpolicy', 'attacker')
+            
+            print("\n[2/3] Training attacker against Pessimistic...")
+            attack_pessimistic = train_RL_attack_with_belief(agent2, 'pessimistic', 'attacker')
+            
+            print("\n[3/3] Training attacker against CAR...")
+            attack_car = train_RL_attack_with_belief(agent3, 'car', 'attacker')
+            
+            print("\n" + "="*70)
+            print("ALL ATTACKERS TRAINED SUCCESSFULLY!")
+            print("="*70)
+            print("\nSaved models:")
+            print("  ✓ attacker_offpolicy.zip")
+            print("  ✓ attacker_pessimistic.zip")
+            print("  ✓ attacker_car.zip")
+            print("\nThese can be used in Options 1-3 for adversarial testing")
+            print("="*70)
         else:
             print("Cancelled.")
     
-    elif choice == '4':
-        # ========== OPTION 4: Check Progress ==========
+    elif choice == '5':
+        # ========== OPTION 5: Analyze Results ==========
+        print("\n" + "="*70)
+        print("ANALYZE CSV RESULTS")
+        print("="*70)
+        print("\nWhich results do you want to analyze?")
+        print("  1. Quick test (5 experiments)")
+        print("  2. Medium test (50 experiments)")
+        print("  3. Full experiment (500 experiments)")
+        print("  4. Custom CSV file")
+        
+        sub_choice = input("\nEnter choice (1-4): ").strip()
+        
+        if sub_choice == '1':
+            df = analyze_csv_results('gridworld_test_5runs.csv')
+        elif sub_choice == '2':
+            df = analyze_csv_results('gridworld_medium_50runs.csv')
+        elif sub_choice == '3':
+            df = analyze_csv_results('gridworld_experiments_500runs.csv')
+        elif sub_choice == '4':
+            filename = input("Enter CSV filename: ").strip()
+            import os
+            if os.path.exists(filename):
+                df = analyze_csv_results(filename)
+            else:
+                print(f"Error: File '{filename}' not found.")
+        else:
+            print("Invalid choice.")
+    
+    elif choice == '6':
+        # ========== OPTION 6: Visualize Results ==========
+        print("\n" + "="*70)
+        print("VISUALIZE EXPERIMENT RESULTS")
+        print("="*70)
+        print("\nWhich results do you want to visualize?")
+        print("  1. Quick test (5 experiments)")
+        print("  2. Medium test (50 experiments)")
+        print("  3. Full experiment (500 experiments)")
+        print("  4. Custom CSV file")
+        
+        sub_choice = input("\nEnter choice (1-4): ").strip()
+        
+        if sub_choice == '1':
+            visualize_experiment_results('gridworld_test_5runs.csv')
+        elif sub_choice == '2':
+            visualize_experiment_results('gridworld_medium_50runs.csv')
+        elif sub_choice == '3':
+            visualize_experiment_results('gridworld_experiments_500runs.csv')
+        elif sub_choice == '4':
+            filename = input("Enter CSV filename: ").strip()
+            import os
+            if os.path.exists(filename):
+                visualize_experiment_results(filename)
+            else:
+                print(f"Error: File '{filename}' not found.")
+        else:
+            print("Invalid choice.")
+    
+    elif choice == '7':
+        # ========== OPTION 7: Check Progress ==========
         print("\n" + "="*70)
         print("CHECK EXPERIMENT PROGRESS")
         print("="*70)
@@ -1531,37 +2175,8 @@ if __name__ == "__main__":
         else:
             print("Invalid choice.")
     
-    elif choice == '5':
-        # ========== OPTION 5: Analyze Results ==========
-        print("\n" + "="*70)
-        print("ANALYZE CSV RESULTS")
-        print("="*70)
-        print("\nWhich results do you want to analyze?")
-        print("  1. Quick test (5 experiments)")
-        print("  2. Medium test (50 experiments)")
-        print("  3. Full experiment (500 experiments)")
-        print("  4. Custom CSV file")
-        
-        sub_choice = input("\nEnter choice (1-4): ").strip()
-        
-        if sub_choice == '1':
-            df = analyze_csv_results('gridworld_test_5runs.csv')
-        elif sub_choice == '2':
-            df = analyze_csv_results('gridworld_medium_50runs.csv')
-        elif sub_choice == '3':
-            df = analyze_csv_results('gridworld_experiments_500runs.csv')
-        elif sub_choice == '4':
-            filename = input("Enter CSV filename: ").strip()
-            import os
-            if os.path.exists(filename):
-                df = analyze_csv_results(filename)
-            else:
-                print(f"Error: File '{filename}' not found.")
-        else:
-            print("Invalid choice.")
-    
     else:
-        print("Invalid choice. Please run again and select 1-5.")
+        print("Invalid choice. Please run again and select 1-7.")
     
     print("\n" + "="*70)
     print("DONE")

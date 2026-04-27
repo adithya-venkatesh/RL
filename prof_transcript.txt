@@ -1,0 +1,773 @@
+Um, yeah. So, it's probably our last meeting before
+3:05
+the Christmas, I think. So, probably, yeah, let's just quickly go over some results that already shared with us last
+3:12
+time, right? So I think basically but you saying that um
+3:20
+on average right so uh pessicle learning did better than the
+3:28
+you know carn right I mean not the car learning right so then
+3:34
+but there are some sort of yeah actually that results require some interpretation so because you also say that uh there's
+3:41
+more percentage you high chance that um just one second.
+4:28
+Yeah, I think the results I think one result says that um car learning actually um car you know
+4:37
+one sort of more times right so compared with the prismatistic learning I don't quite understand that results actually
+4:45
+we think that you exact same setting then compare the two algorithms.
+4:51
+Yes. So you set you fix the what the random seed so that you have the exact same
+4:56
+setting. But you know because in this case you know average of
+5:01
+course makes sense right you think and all maybe 10 different runs of the algorithm you know you get
+5:07
+some you know average result with some variance right but when you say that um
+5:13
+car learning wins you know like 70% of time I don't quite understand what does
+5:20
+that mean right so they're not competing against each other oneonone right so
+5:26
+Um I mean I I just made it so it'll
+5:32
+interpret how many times each algorithm performed the best. So um the car
+5:39
+operator performed the best out of all three uh 86 times out of 500
+5:44
+experiments. Yeah. So basically
+5:52
+so for each experiment 500 experiment for each experiment you fixed you fixed what you fixed everything
+5:58
+just yeah so I mean I kept the car operator I I didn't change the car
+6:04
+operator I just I um I tried to uh have make an
+6:10
+implementation of the uh greedy where we would take um in the behavior policy we
+6:18
+would do the pessimistic maxim approach and then in the target policy use a
+6:23
+simple greedy target. Yeah. Right. That's the third algorithm right that's sort of best so far right.
+6:31
+Yeah. Yeah. Yeah. I mean, but I'm trying to understand in one sense, you know, when we compare these three algorithms,
+6:37
+right? So, um you have basically two measures. One is the average, the other
+6:42
+one is sort of number of times, right? So, when the algorithm wins, okay, so but then that only makes sense when
+6:49
+you know in each experiment to run you have the exact same setting for all these three, right? So,
+6:56
+I'm not sure whether how you ensure that, right? So it has a lot of, you know, randomness. There's some randomness in there.
+7:01
+Oh, I see. Okay. Um Okay. I don't know if I considered
+7:08
+that. Um but
+7:14
+um if those 500 experiments say, you know,
+7:19
+they have when you run the experiment each time, you know, different algorithm actually have, you know, see different
+7:26
+configurations. I mean of course you say it's 80 what more than 80% right so that
+7:31
+still makes sense right so I mean it's a large yes percentage right so just I want to make sure it's um the comparison fail
+7:39
+sometimes right so I don't yeah I'm not sure whether like in the code I shout in
+7:45
+shadow with you I just wonder at each um
+7:50
+yeah I don't how
+7:57
+to claim that one algorithm wins more than the other algorithm, right?
+8:04
+Because they are not playing a game against each other, right? Directly in that setting, you are running two independent experiments, one for each
+8:11
+algorithm, right? So then the percentage, right? I'm not sure how to
+8:17
+interpret that actually. Yeah.
+8:22
+then then maybe the percentage might be inaccurate.
+8:28
+Yeah, I'm not sure whether I mean it's because it's there's a large difference. Therefore, we do need to understand that
+8:35
+and so I mean like why you know for example the car greater wings over you know the
+8:42
+pomemetic learning you know more times but then the average performance is actually worse. Yeah. Are we saying that when it
+8:48
+actually uh you know
+8:54
+perform worse then actually you know this has a big gap or something like that I don't know it alo actually it
+9:00
+would help if you can draw some figures you know to visualize the result so that we have a better understanding okay
+9:05
+like you can show us the result for the 500 runs for each algorithm for example
+9:10
+oh okay I can I can run I can yeah right so then we can see whether it's because you know maybe
+9:17
+Um yeah there's like a bigger variance you know large variance for the
+9:23
+cooperator right so okay I can run those experiments it'll
+9:28
+take some time but I can do um but um as far as the runtime I um
+9:39
+obviously it didn't really improve in the tabular setting but I think in a DQN setting it would so if I can verify Y
+9:47
+that the comparison is fair then do you think we should try to apply the results
+9:54
+to I think so I think so yeah right so but we of course we need to think about how to do this right so I mean of course you
+10:00
+have the uh cooperator you know caring algorithm you can use their
+10:06
+implementation right so char also give you our pomestic learning
+10:11
+implementation DQ version okay we have two versions but you know so we
+10:17
+can start with maybe the simplest the simpler one right so but then of course the third algorithm you have to somehow
+10:25
+change it to our you know settings right so basically you can you can keep the
+10:30
+belief modeling part but use a grad part but I think the grady part is something
+10:36
+you can get from the you know the the call dqm right so
+10:41
+basically you take that part from them right somehow merge two algorithm Yeah,
+10:46
+but that's uh that's probably not trivial for you, you know, because you have to understand this algorithm. You
+10:52
+need to know well they implement these, you know, details, right? So, yeah, they're going to time. Yeah. Mhm. But I
+10:59
+think it's worth trying. I think it's um Yeah. Mhm. Okay.
+11:05
+Um
+11:13
+so then um yeah I think the first step would still be to have a more sort of you know
+11:20
+understanding about the counter results. Okay. So why car
+11:26
+operator you know learn more you know wins more times but then u t works
+11:32
+average performance a little bit you know kind of we want to understand that a little bit more right so
+11:38
+yes I think um
+11:44
+yeah I'm not talking about the third algorithm yet understand the difference between our
+11:50
+operator and our algorithm Yeah,
+12:02
+I see the green radio.
+12:09
+Yeah, since you see the corporator STD is really high. So which means it could
+12:18
+be in some cases like the the reward in some run is higher than the other two
+12:24
+algorithms. Yeah. But the rest of the the wrong it has a really low reward. So
+12:30
+which could cause this thing happen. Yeah. It has win certain wrongs but yeah
+12:36
+the rest of the wrong it has really low. Yeah. Yeah. I think why I think we want to you know
+12:42
+basically um yeah you have 500 time now 500
+12:47
+experiments right so but then so still I want this um we should fix the somehow
+12:55
+fix the random seeds if you haven't done it right so I think that's something can show you how to do that so basically we
+13:02
+do want you know for each of these three algorithm okay you the same 500 experiments
+13:08
+okay right so we same exact same parameter but there are some randomness right so they have you have to control the random
+13:15
+seeds make sure that they do the exact same you know 500 experiments okay yeah I yeah I don't think I'm sure
+13:22
+how to do that so if you could show me later
+13:28
+um but it is
+13:34
+a I don't think there any randomness in this in this environment
+13:42
+deviation and no randomness. Yeah,
+13:48
+I don't think there's any randomness in the like the the discrete grave word
+13:53
+like the simple must be some but then where the randomness comes from these algorithm these are all deterministic right
+14:00
+yeah there's no I don't think there's any randomness no no I'm saying that these algorithm they also they are killing basics
+14:06
+algorithm the self is deterministic if the has no randomness why we see such a
+14:12
+big Oh then you then you don't need to run 500
+14:17
+time just one time is sufficient right
+14:22
+I think the results the training stage testing test should be test oh yeah there is
+14:28
+some how many uh in a code right so we have
+14:35
+how many run how many episodes we use for training just for testing I don't know yeah Maybe
+14:42
+two,000 steps training. Same setting. Yeah. Learn two 20
+14:49
+something.
+14:57
+Yeah. Yeah.
+15:17
+So, do you have the code right now or maybe you just do the same code you shadow as last time?
+15:22
+Yeah, it's the same. Okay, I'm trying to random.
+15:28
+I play against the the
+15:33
+IO based adversary attacker. Are these results against the
+15:45
+Yeah. What attack are we using? No attack
+15:51
+of bastic
+15:57
+wind distribution.
+16:05
+Yeah, it's another question. What which attack are we using here?
+16:13
+Uh let's see.
+16:30
+Okay.
+16:37
+Only four seconds.
+16:43
+Let's see.
+17:10
+Play. Oh yeah. Play
+17:17
+test results cooperator test
+17:31
+off. That's the result. Oh, there's no talking.
+17:43
+How far do you talk?
+17:52
+That's the way that there's
+17:58
+no reason to see such a big gap, right? Whatever it should be relatively good
+18:10
+is a talk is there a code you yeah play with
+18:16
+believe here a talk equals a talk model
+18:27
+yeah there is a talk in the system yeah there is a What attack?
+18:33
+Uh I think try to post the
+18:42
+top model comes
+18:47
+determine. Okay. Okay.
+19:05
+word train with bas
+19:12
+train. Yeah. So in the main function there's test with re with trained
+19:18
+attacker in that part it tests against train attacker
+19:31
+test without attack. Okay.
+19:44
+With belief cooperator. Yeah. So in that case um
+19:50
+so do you have results for the case without attacks? I think in the code actually you should actually also have
+19:56
+the results without attacks, right? Yeah. For each three baselines. Uh let me see. I think so. You have test
+20:03
+average reward stand deviation grade inference time but there also results
+20:08
+respect to baseline right so without attacks
+20:14
+yeah in the CSV file should be there
+20:19
+uh test with trade attacks Okay.
+20:33
+Um but it seems that
+20:41
+there's a way you pic
+20:46
+something of determinist. Just going to
+21:08
+attack.
+21:16
+Yeah, but I think it seem that um
+21:22
+just call versus security versus the telecom.
+21:35
+Play with play with this
+21:41
+attack agent. Q1, Q2, Q3. Learn
+21:53
+policy target
+22:00
+environment.
+22:11
+So why did we enable attacks? I didn't already see that. Uh there is the in the
+22:19
+game trial 100 it's already in the true
+22:31
+a function called play at believe there uh the argument attack model equals
+22:37
+attack model. Yeah it actually pass in the train model there.
+22:47
+attack model. But why is attack model play attack with belief? Yeah, I see
+22:52
+attack model before play with. Oh, agreed. I don't see attack model. No
+22:57
+attacker, right? Yeah, I think the attacker is
+23:03
+trained for the pessimistic e-learning. So, it might not be optimal against policy and car.
+23:10
+Uh, uh, no, I'm uh Yeah, I mean but we can
+23:16
+we train for the Yeah, the problem is I don't even see the parameter, you know, for the for the
+23:23
+other two. Did they use a T? What type did they use? Um
+23:29
+yeah, let me know
+23:36
+card.
+23:55
+Right now it seems that uh here you know when you do the pessimistic learning you
+24:01
+have attack model here right there are two cases you first try the case without attack okay then you try the case with
+24:08
+attack you know but here you have attack model right but for the other two algorithms
+24:14
+um like this one for example you know the
+24:19
+um of policy there's no attack model right so I don't even know which attack are you using an attack right so because
+24:26
+it's same right so here without attack test without attack is like this but then test with attack
+24:33
+uh essentially the same right you know so that's why uh you we are not
+24:40
+specifying attack model right here for prismmetic Q we did specify attack model
+24:45
+but I agree that the attack model is only developed against Q1 right so agent
+24:51
+Q1 so therefore it's not optimal attack yeah yeah to these other two environments right
+24:57
+but the first thing that's for these two like whether they use attack or not I don't know what what what attack did
+25:03
+they use or maybe the attack is trained they use some other some different attack I don't know yeah M
+25:10
+but obviously you want to do something like this right they train attack here against the cooperator then against the
+25:17
+policy basically you want to train say separate attacks right so but then you have to specify them right
+25:23
+right now I don't know whether where attack is specified right so in the in this code
+25:29
+of policy graded target I don't specify the attacker
+25:46
+Yeah, I'm here.
+25:51
+Probably not. I don't see a tapper used in the basically the environment has to
+25:57
+use a tapper to generate the perturbation. Why? How is perturbation generated?
+26:05
+should um get worst case from the attacker. So you did use attacker right?
+26:12
+But then how is generate his agent is what get attack state?
+26:19
+Um
+26:26
+this agent is what? Which agent?
+26:31
+Policy with belief.
+26:37
+Okay, let me not let's check that. Let's check card first to calculate. Okay, let's see. How did you generate attack
+26:44
+here? Start with what is the perturbative
+26:52
+state here? Um
+27:01
+the state order state action action order state
+27:11
+uh seem like no there's no attacker. Yeah. So for pestic no attack uh
+27:17
+for the car. Yeah. For car. Yeah. Seem that no attack, right?
+27:25
+Right. So you're using the same old state. So there's no attack.
+27:31
+Yeah. Somehow you have to also implement the attack I guess. Yeah. So you have to
+27:36
+look into our nestic algorithm to implement the attack. But then I'm
+27:41
+surprised if there's no attack why the performance actually varies a lot for car
+27:47
+operator.
+27:57
+Q. But this uh action is determined by older state,
+28:02
+right? But older state is just the environment state. No perturbation. All right. So basically here you have to
+28:09
+somehow obate using attack, right? So okay. So you have to first train attack
+28:15
+against uh this Q2, right? So they have to give it to the function like here whe
+28:23
+that's a taco model similar to basmastic Q they have to use it okay the way to
+28:28
+use it is very similar to similar yeah so like here you know um
+28:35
+with belief okay but I think similar right yeah
+28:41
+you have to generate this old state but you have to generate attack state right
+28:46
+so from this old state. This is where we do perturbation, right? Yeah. So the agent is actually give this agent
+28:53
+to the to the function, right? So then you can generate this attack state. Then
+28:59
+when you take the action, the attack state needs to be used instead of the
+29:04
+the actual old state. Okay. Okay. So you need to look into this part of our code then adapted to the
+29:14
+uh cooperator. Okay. I know there's no attack for cooperator. Yeah, there is attack for this this this one
+29:23
+because I just seen that you also use this you know attack but then I don't know which agent you're
+29:28
+using here because uh I think it to the oh you have agent here
+29:36
+but which agent it is
+29:41
+a little bit clear right so for in this case which agent you are using I didn't see that
+29:51
+are using the
+29:57
+CSV.
+30:02
+Um, no. Yeah, which I can tell you are using. Let's see. Where's the code
+30:10
+for the without attack with a policy graded? Did
+30:18
+you generate actually generate agent here? But this agent has no attack, right?
+30:25
+Also no attack, right? It's just a two agent. Oh, this is not.
+30:33
+Yeah, because for the pessic part you actually generate agent. Oh yeah, same here. This attack
+30:40
+agent. No, this is the this without attacks. But with attack,
+30:47
+how did we get this agent? Okay, these are without attack. Let's see with attack. This attack model.
+30:53
+Okay, for pessimistic. Now for
+31:02
+for car you don't have attack right? Yeah.
+31:07
+And for here you also don't have attack right because you don't want to give the agent to the fun. You want to give
+31:14
+attack model to the function, right? Yeah. Here you don't have you don't have attack model. So
+31:21
+yeah right. So there no attack model. Okay.
+31:27
+Yeah. So basically now you only have these agent but these agent just without attacks. So these just normal agents.
+31:34
+Yeah, these are just uh yeah, normal agents trained using your algorithm,
+31:40
+right? Yeah. Although it's also a little bit
+31:45
+confusing to me. What are these agents here?
+31:51
+What's the difference between agent one and agent Q, environment one, environment two? They're the same,
+31:56
+right? Yes. So what you initiate a new environment? You should use the same environment if
+32:02
+you want to have a fair comparison. It's it
+32:09
+actually yeah I train it. What is Q agent here? You see the
+32:15
+you see the train agent. No, you just initialize based on that environment,
+32:21
+right? Or actually train it is uh the play and with learning equals true,
+32:28
+right? Yeah. Train it with 200 time 2000. Yeah. And the play with cooperator based on that,
+32:35
+right? But if you initialize two different environments, I don't know whether you can still fix the random
+32:40
+seat somehow. I don't know.
+32:47
+Because you can just use the same environment, I assume, right? Yeah. Yeah, sure. You can just use the same. It doesn't matter to use another
+32:53
+environment. Yeah. Same environment. If it's same environment, probably you
+32:58
+can just set the random seat once here or you can just I don't know leave it. This is training of course, you know,
+33:05
+probably doesn't really matter. Okay. So, you're not testing yet, right? This is training. Okay. Yeah.
+33:12
+Um Yeah. But um these are training okay but when you do
+33:18
+testing you also use this environment right so you also use the same training you know the parameter so therefore if
+33:26
+you have you have to somehow fix the seed right otherwise you are using three different environments for testing right
+33:33
+so oh okay testing right so I don't know if you need to initiate another environment for
+33:39
+testing maybe that's better I think it probably want to Everything are trained together, then everything are testing
+33:45
+together. Is that will that help or if you just success random seat the same
+33:50
+random seat that would be fine, right? Maybe um
+34:06
+right now actually in the same environment for training and testing, right? But that environment is probably
+34:13
+different for different agents. Yeah. Right. And also I'm not sure what's a good idea to use
+34:19
+the same for training and testing actually. Right. The issue actually here.
+34:25
+Okay. Typically we want to see the training code and testing code separate.
+34:32
+Okay. Yeah. You know independent environment at least. Okay. Okay.
+34:40
+Yeah. But in this case actually you probably using one environment not one environment. Okay. So you can use
+34:46
+different environment to train different agents that's fine. But when testing them you want to use the same.
+34:52
+Okay.
+34:59
+All right. So that's uh that's another issue. But I think the major problem if you that you don't have a tax for
+35:05
+pessimistic for for car and also for the you know the new algorithm. So I can use
+35:11
+their uh attacker you said right and yeah you can just use our attack I think
+35:17
+so right now you can just like I assume this uh our attack right now is uh
+35:22
+generated by what I think
+35:30
+let's see here train attack right so
+35:36
+yeah you can use our attack um but this is train Attack with belief. What does that mean?
+35:44
+Belief don't know what's
+36:06
+Yeah. Yeah. Can use three different environment to I mean but if you run 500 times I won't
+36:13
+worry too much about it but still I think right now I think let's try to fix this no no attack case right so you
+36:20
+should have for the two algorithms okay
+36:26
+and the way to do that again is try to train attack against each of these algorithm okay then in the algorithm you
+36:32
+have to use attack to generate the states okay Okay.
+37:04
+Okay. I think I have to go have another meeting. Okay. But I think so I should just use the same
+37:11
+environment for the testing and then um yeah do need to create a different
+37:16
+environment for each. Yeah. And then also uh the random seed or the
+37:23
+attacker for the car and the third. I think if you use the same environment
+37:28
+like I could just initiate one environment that's okay. Okay. Well still I think it's better. Yeah. I
+37:34
+need to fix and then lastly
+37:39
+attacker for the car and the third algorithm. Yeah, I think there's still some
+37:44
+details. Uh you guys can probably meet uh you know a little bit longer. I have to go but
+37:50
+yeah probably can show you how to set you know random seat for the Okay. And then um yeah we I think you
+37:57
+should you guys probably should also go over the code for our attack so that RD
+38:03
+has clear idea how to incorporate into the other two algorithms. Okay. But that's not it's unclear to me yet. So
+38:10
+why car operator has such a big variance if there no attack. Okay.
+38:16
+Okay. That's not clear to me. Right. So average performance is very bad. Why? Okay. Yeah.
+38:21
+Not attack. Okay. Okay. I'll Yeah. Okay, I'll try to figure it out. Yeah. So you guys, you know, I suggest
+38:27
+that you just, you know, keep talking for a while, then try to figure out this details a little bit further. Okay.
+38:34
+Okay. Yeah. Thank you. So I need to go. Um
+38:44
+Okay. Um so let me see. I think there is one
+38:54
+Uh I think uh how many C I have I
+39:00
+to train like the the attack agent for other two algorithm.
+39:05
+Yeah I think you just need to
+39:11
+use the same function just passing the different uh agents. Okay.
+39:18
+Uh uh let me see that
+39:25
+group of attack.
+39:32
+Uh
+39:39
+yeah with passing different agent. Yeah. Okay. I think that should work.
+39:46
+Okay. I can try. Um and also for setting the random seed. Uh
+39:52
+if you search seed Mhm. like in the environment I think there is the
+40:00
+in the in the in the in the which function in the grid. Uh this one
+40:12
+uh yeah in the function in the class grid word mhm the environment there is a function
+40:20
+called def seat if you see that and also in the reset function there's
+40:25
+also a seed argument it default is null okay so you want to make sure like in each
+40:32
+episode uh you fix initial that the only randomness in the initial state in the
+40:40
+in the grid word map. So you need to uh like pass the same random
+40:48
+state like it's just the integer. Okay. For example, if you compare uh the same
+40:55
+the performance of this real algorithm under the same initial state. So you just use the same random state.
+41:01
+Okay. And for the next episode gives them another same random state but it's diff different from the previous one. So
+41:07
+you can pre compare these three algorithm fairly. Yeah. Okay. Um
+41:13
+okay. And then what um
+41:20
+how do I train the attacker for our third algorithm? But let me see if you
+41:25
+see uh in your code currently you see there is a function you run with the
+41:35
+yeah train a taco with belief with agent Q1 okay
+41:45
+yeah I think the currently let me double check I think currently
+41:51
+the t It's only based on the Q function. It does not consider how the the
+41:59
+algorithm takes into account. Yeah. Okay. You know what I mean? Just take the Q
+42:04
+function into account but not the other thing here. If I let me double
+42:10
+check it. Yeah, if you want to take the defense
+42:17
+algorithm into account then it be a little more complicated. 22. Yeah.
+42:24
+Yeah. You need to call like the each you need to mod but just need to modify
+42:30
+the function a little bit. You just need to call each action each a each agent way to get action like
+42:37
+the Yeah. Okay. Let me see. I think the agent action
+42:46
+Yeah. Currently the agent action is self aent Q.truce action with AT
+43:00
+you see that? Yeah. So uh I believe this agent Q choose action
+43:10
+at this should be the our let me double this should be the
+43:36
+Uh return optimal. Okay. Choose action. Choose action.
+43:46
+This way.
+45:30
+Transit.
+45:43
+Oh yeah. Okay. Wait. Agent get a policy.
+45:52
+My policies already
+46:16
+defend their policy agent
+46:22
+Okay.
+46:45
+Okay. See yourself
+46:51
+and auction. Enter
+47:18
+defender all this. Oh, okay. Okay. So that's Yeah. Yeah. Yeah. So
+47:28
+yeah, if you want to play against use,
+47:34
+you can play against the
+47:43
+current attack.
+47:56
+Yeah. So basically the current uh the IO environment the great world
+48:02
+attack. So it consider the
+48:09
+our like the pessimistic Q defense. The agent Q is a pessimistic Q agent.
+48:15
+Oh yeah. I think it's uh it's uh like
+48:21
+it's recursively update it defender policy and use it to get the action.
+48:28
+Okay. So it is the attack against the
+48:34
+yeah the pessimistic Q agent. So if you want to play it against other type of agent you
+48:42
+might need to modify a little bit. Okay. So let me show you how. So
+48:48
+basically currently what I what we did is Can you see the code?
+48:53
+Uh I see the code. Yeah. Okay. So currently so this is the envir
+48:59
+the environment world t right. So basically you passing a agent Q right?
+49:05
+Yeah. And this agent Q currently is a pessimistic Q learning agent. So if you
+49:12
+see the code the step function uh
+49:19
+the agent action you see is a choose action at yeah
+49:26
+okay so choose action at is a built-in function for the agent Q
+49:32
+and with a defender policy. Yeah. So agent Q it update defender policy with a belief get policy with belief.
+49:38
+These two line actually complete how with the belief. Yeah. So basically this
+49:45
+this this
+49:51
+few lines just inject the all the input the pistic Q in
+49:58
+the IO attack. Yeah. So what you want is to change like this with a car how a car operator get
+50:06
+action and how the your off policy get action. Yeah. Oh okay I understand.
+50:11
+Okay. So just replace this lines with different uh different type of agent. So
+50:18
+you may want to rename this function as the original one with uh I attack
+50:25
+against pessimistic and create another two. Okay. I'll just do some like
+50:32
+modification but you know just Okay. So, um, for the car operator, should I also
+50:39
+just modify the previous one or should I use their attacker?
+50:45
+Mean, what do you mean by zero attacker? The um in the previous paper
+50:54
+uh just uh use our use this code to create a tug against the carburetor.
+51:02
+Just use this code. Okay. Yeah, but you need to incorporate the car operator hold car operator
+51:08
+choose action here. Yeah. Yeah. Yeah. Okay. Just here. Yeah. Just here. Okay. You may you may want to like create
+51:15
+another argument here to to specify which agent you are using and
+51:21
+to yeah use different way to your generation. Yeah. Yeah. So do that. Okay. And the trains is the same. So the train
+51:29
+function just I don't say you need to modify that. Yeah. Just call it. Okay.
+51:34
+Okay. I understand. I need to save to different uh model. Yeah, you need to save to different
+51:39
+model. Okay.
+51:45
+Let me see. So currently our training
+51:53
+uh where is the train code over the top?
+52:07
+Yeah. Here you train a T model here, right? Uh so now you are passing
+52:15
+Yeah. You need to pass more thing. Yeah. Okay. Yeah. So you need to add you need to
+52:20
+modify this function a little bit but not too much. Yeah. Okay.
+52:30
+Yeah. You may you may want add another argument like type something like that.
+52:35
+Yeah. Okay. And pass in here. Okay.
+52:41
+Got it. Yeah. Yeah. Okay. Thank you. Yeah. And resting the same.
+52:47
+Yeah. Okay. Thank you. Um, yeah, I'll do I'll do I'll do the uh
+52:52
+these updates and I'll email you. Thank you. Yeah. Yeah. Yeah. Have a good day.
+52:58
+Bye.
