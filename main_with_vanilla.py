@@ -3,17 +3,15 @@
 
 Gridworld RL comparison: Vanilla vs Pessimistic vs Off-Policy Greedy.
 
-Based on the old code's stable Pessimistic implementation.
-Compares three algorithms:
-1. Vanilla Q-Learning (baseline)
-2. Pessimistic Q-Learning 
-3. Off-Policy Greedy Target (pessimistic behavior + greedy target)
+Reference: Sun & Zheng (ICLR 2024) — Belief-Enriched Pessimistic Q-Learning
+Against Adversarial State Perturbations.
 
-Includes:
-- Inference timing and attack timing measurements
-- CSV logging for all experiments
-- Pause/Resume capability
-- Progress tracking and analysis
+Compares three algorithms:
+1. Vanilla Q-Learning (baseline) — Eq. 4.1
+2. Pessimistic Q-Learning — Algorithm 1 + Algorithm 2 (belief)
+3. Off-Policy Greedy Target (extension) — Eq. 5.1–5.2
+
+Includes inference timing, CSV logging, pause/resume, and progress tracking.
 """
 
 # Import all the libraries
@@ -34,14 +32,23 @@ from stable_baselines3 import SAC, PPO, TD3, DQN
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-# define the linear schedule exponential function
 def linear_schedule_exp(min_exp, ini_exp, total, current):
+    """**Eq. 6.3:** ε_t = max(ε_min, (T − t) · ε_init / T)
+
+    Annealing schedule for exploration rate ε′_t and learning rate α_t.
+    """
     return max(min_exp, ((total-current)*ini_exp)/total)
 
-# Define the GridWorld Class
+# Eq. 1.1: MDP M = ⟨S, A, P, R, γ⟩
+#   S = 5×5 grid states, A = {UP, DOWN, LEFT, RIGHT}
+#   R(bomb) = -10, R(gold) = +10, R(default) = -1
 class GridWorld(gym.Env):
-    ## Initialise starting data
     def __init__(self):
+        """**Eq. 1.1:** M = ⟨S, A, P, R, γ⟩
+
+        S = 5×5 grid; A = {UP, DOWN, LEFT, RIGHT};
+        R(bomb)=−10, R(gold)=+10, R(default)=−1; γ used by Q_Agent.
+        """
         # Set information about the gridworld
         self.height = 5
         self.width = 5
@@ -66,26 +73,35 @@ class GridWorld(gym.Env):
         self.observation_space = spaces.MultiDiscrete([5,5])
 
     def get_available_actions(self):
-        """Returns possible actions"""
+        """**Eq. 1.1:** a ∈ A = {UP, DOWN, LEFT, RIGHT}
+
+        Returns the discrete action space A of the MDP.
+        """
         return self.actions
 
     def agent_on_map(self):
-        """Prints out current location of the agent on the grid (used for debugging)"""
+        """Visualizes agent position on the grid for debugging."""
         grid = np.zeros(( self.height, self.width))
         grid[ self.current_location[0], self.current_location[1]] = 1
         return grid
 
     def get_reward(self, new_location):
-        """Returns the reward for an input position"""
+        """**Eq. 1.2:** R(s, a) = E[R_t | s_{t−1}=s, a_{t−1}=a]
+
+        In this grid, reward depends on state s only (bomb/gold/default cells).
+        """
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
+        """Set random seed for reproducibility."""
         if seed:
             np.random.seed(seed)
 
     def step(self, action):
-        """Moves the agent in the specified direction. If agent is at a border, agent stays still
-        but takes negative reward. Function returns the reward for the move."""
+        """**Eq. 6.1:** s′ = T(s, a);  **Eq. 6.2:** terminated = 𝟙[s′ ∈ {s_bomb, s_gold}]
+
+        Environment transition: observe R(s,a), move agent, return (s′, R, done).
+        """
         # Store previous location
         last_location = self.current_location
         if action in [0,1,2,3]:
@@ -132,6 +148,10 @@ class GridWorld(gym.Env):
         return np.asarray(self.current_location), reward, terminated, truncated, {}
 
     def take_action(self, state, action):
+        """**Eq. 6.1:** s′ = T(s, a)  (deterministic transition, no reward)
+
+        Used in belief propagation (Eq. 3.2): M′_t = {s′ : ∃s∈M_t, P(s′|s,a)>0}.
+        """
         last_location = state
         if action in [0,1,2,3]:
             true_action = self.actions[action]
@@ -168,10 +188,15 @@ class GridWorld(gym.Env):
         return tuple(state)
 
     def check_state(self):
+        """**Eq. 6.2:** terminated = 𝟙[s ∈ {s_bomb, s_gold}]"""
         if self.current_location in self.terminal_states:
             return 'TERMINAL'
     
     def reset(self, seed=None):
+        """**Algorithm 1, Line 3:** Initialize true state s₀ ∈ S \\ {terminals}
+
+        Sample random non-terminal starting position for a new episode.
+        """
         self.total_step = 0
         if seed is not None:  
             np.random.seed(seed)
@@ -182,16 +207,15 @@ class GridWorld(gym.Env):
             self.current_location = [np.random.randint(0,5), np.random.randint(0,5)]
         return np.asarray(self.current_location)
 
-# Define the attack class
+# Eq. 1.5–1.6: Attacker MDP ⟨S, S, P̃, R̃, γ⟩ for training DQN attacker (Section 2.2)
+#   R̃(s, s̃) = − Σ_a π(a|s̃) R(s,a)
+#   P̃(s'|s, s̃) = Σ_a π(a|s̃) P(s'|s,a)
 class GridWorld_RL_Attack(gym.Env):
-    ## Initialise starting data
     def __init__(self, agentQ, agent_type='pessimistic'):
-        """
-        Initialize attack environment for training adversarial attackers.
-        
-        Args:
-            agentQ: The agent to train against
-            agent_type: 'pessimistic' or 'offpolicy'
+        """**Eq. 1.5–1.6:** Attacker MDP ⟨S, S, P̃, R̃, γ⟩
+
+        R̃(s, s̃) = −Σ_a π(a|s̃) R(s,a);  P̃(s′|s,s̃) = Σ_a π(a|s̃) P(s′|s,a).
+        Wraps a trained defender (pessimistic or off-policy) for DQN attacker training.
         """
         self.agent_type = agent_type
         # Set information about the gridworld
@@ -220,32 +244,39 @@ class GridWorld_RL_Attack(gym.Env):
         self.belief = None
 
     def get_available_actions(self):
-        """Returns possible actions"""
+        """**Eq. 1.4:** Attacker action space A_att = {UP, DOWN, LEFT, RIGHT, STAY}
+
+        Each action selects a perturbation s̃ ∈ B_ε(s).
+        """
         return self.actions
 
     def agent_on_map(self):
-        """Prints out current location of the agent on the grid (used for debugging)"""
+        """Visualizes agent position on the grid for debugging."""
         grid = np.zeros(( self.height, self.width))
         grid[ self.current_location[0], self.current_location[1]] = 1
         return grid
 
     def get_reward(self, new_location):
-        """Returns the reward for an input position"""
+        """**Eq. 1.2:** R(s, a) — defender reward at state s (negated for attacker in step)."""
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
+        """Set random seed for reproducibility."""
         if seed:
             np.random.seed(seed)
 
     def step(self, action):
-        """Moves the agent in the specified direction. If agent is at a border, agent stays still
-        but takes negative reward. Function returns the reward for the move."""
+        """**Eq. 1.4–1.6:** s̃ ∈ B_ε(s);  a = π(s̃);  R̃(s,s̃) = −R(s,a)
+
+        Attacker MDP step: perturb observation, defender acts, attacker gets R̃.
+        """
         # Store previous location
         last_location = self.current_location
         if action in [0,1,2,3,4]:
             true_action = self.actions[action]
         else:
             true_action = action
+        # Eq. 1.4: Compute perturbed state s̃ from attacker action (s̃ ∈ B_ε(s))
         # UP
         if true_action == 'UP':
             if last_location[0] == 0:
@@ -275,7 +306,7 @@ class GridWorld_RL_Attack(gym.Env):
 
         # Agent action selection depends on agent type
         if self.agent_type == 'pessimistic':
-            # PESSIMISTIC: Use belief-based policy
+            # Eq. 2.1 + Eq. 3.4: a = π(s̃) via belief-enriched defender policy
             agent_action = self.agentQ.choose_action_att(
                 ['UP', 'DOWN', 'LEFT', 'RIGHT'], 
                 tuple(self.purturb_state), 
@@ -283,7 +314,7 @@ class GridWorld_RL_Attack(gym.Env):
             )
             self.current_location = self.take_action(self.current_location, agent_action)
             
-            # Update belief for pessimistic agent
+            # Eq. 3.2–3.3: Belief update M_{t+1} = M'_t ∩ B_ε(s̃_{t+1})
             possible_true_states = self.agentQ.get_ball(self.purturb_state)
             belief_before_action = states_intersection(self.belief, possible_true_states)
             self.belief = set()
@@ -294,7 +325,7 @@ class GridWorld_RL_Attack(gym.Env):
             )
         
         elif self.agent_type == 'offpolicy':
-            # OFF-POLICY: Use greedy from Q-table at test time
+            # Eq. 4.2: Greedy test policy a = argmax_a Q(s̃, a) (no belief at test)
             state = tuple(self.purturb_state)
             q_values = self.agentQ.q_table_withatt[state]
             maxValue = max(q_values.values())
@@ -307,6 +338,7 @@ class GridWorld_RL_Attack(gym.Env):
             raise ValueError(f"Unknown agent_type: {self.agent_type}")
         
         terminated = list(self.current_location) in self.terminal_states
+        # Eq. 1.5: Attacker reward R̃(s, s̃) = −R(s, a)
         reward = -self.get_reward(self.current_location)
         self.total_step += 1
         truncated = self.total_step >= 1000
@@ -314,6 +346,7 @@ class GridWorld_RL_Attack(gym.Env):
         return np.asarray(self.current_location), reward, terminated, truncated, {}
 
     def take_action(self, state, action):
+        """**Eq. 6.1:** s′ = T(s, a)  (deterministic transition for defender in attacker MDP)"""
         last_location = state
         if action in [0,1,2,3]:
             true_action = self.actions[action]
@@ -350,7 +383,7 @@ class GridWorld_RL_Attack(gym.Env):
         return tuple(state)
 
     def check_state(self):
-        """Check if the agent is in a terminal state (gold or bomb), if so return 'TERMINAL'"""
+        """**Eq. 6.2:** terminated = 𝟙[s ∈ {s_bomb, s_gold}]"""
         if self.current_location == self.bomb_location:
             print("BOOM")
         if self.current_location == self.gold_location:
@@ -359,7 +392,12 @@ class GridWorld_RL_Attack(gym.Env):
             return 'TERMINAL'
 
     def reset(self, seed=None):
+        """**Eq. 3.1:** M_0 = B_ε(s̃_0)  (initialized to all states in this tabular grid)
+
+        Reset attacker environment and defender belief/policy.
+        """
         self.current_location =  [np.random.randint(0,5), np.random.randint(0,5)]
+        # Eq. 3.1: Initialize belief M_0 = all states (relaxed from B_ε(s̃_0) for tabular grid)
         self.belief = set()
         for state in self.agentQ.all_state:
             self.belief.add(state)
@@ -373,10 +411,14 @@ class GridWorld_RL_Attack(gym.Env):
         self.total_step = 0
         return np.asarray(self.current_location)
 
-# Define the Q Agent
+# Algorithm 1: Pessimistic Q-Learning (tabular implementation)
+# Maintains Q(s,a) in q_table (vanilla) and q_table_withatt (robust)
 class Q_Agent():
-    # Intialise
     def __init__(self, environment, epsilon=0.05, alpha=0.1, gamma=1):
+        """**Algorithm 1, Line 1:** Initialize Q(s,a) ∀ s∈S, a∈A
+
+        Tabular Q-tables: q_table (vanilla) and q_table_withatt (robust).
+        """
         self.environment = environment
         self.q_table = dict()
         self.q_table_withatt = dict()
@@ -393,8 +435,10 @@ class Q_Agent():
         self.defender_policy = None
 
     def choose_action(self, available_actions, eps = 0.05):
-        """Returns the optimal action from Q-Value table. If multiple optimal actions, chooses random choice.
-        Will make an exploratory random action dependent on epsilon."""
+        """**Eq. 2.3 / Eq. 4.2:** a = argmax_a Q(s,a) w.p. 1−ε′; else a ∈ A uniform
+
+        Vanilla ε-greedy policy (Algorithm 1, Lines 8–9, no perturbation).
+        """
         if np.random.uniform(0,1) < eps:
             action = available_actions[np.random.randint(0, len(available_actions))]
         else:
@@ -405,8 +449,10 @@ class Q_Agent():
         return action
 
     def choose_action_att(self, available_actions, state, eps = 0.05):
-        """Returns the optimal action from Q-Value table. If multiple optimal actions, chooses random choice.
-        Will make an exploratory random action dependent on epsilon."""
+        """**Eq. 2.3 / Eq. 3.4:** a = π(s̃) w.p. 1−ε′; else a ∈ A uniform
+
+        π(s̃) from get_policy_with_belief (Algorithm 5, Line 7).
+        """
         if np.random.uniform(0,1) < eps:
             action = available_actions[np.random.randint(0, len(available_actions))]
         else:
@@ -414,7 +460,10 @@ class Q_Agent():
         return action
     
     def learn(self, old_state, reward, new_state, action, alpha = 0.1):
-        """Updates the Q-value table using Q-learning"""
+        """**Eq. 4.1 / Eq. 1.3:** Q(s,a) ← (1−α)Q(s,a) + α[R + γ max_{a′} Q(s′,a′)]
+
+        Standard vanilla Q-learning temporal-difference update.
+        """
         q_values_of_state = self.q_table[tuple(new_state)]
         max_q_value_in_new_state = max(q_values_of_state.values())
         current_q_value = self.q_table[tuple(old_state)][action]
@@ -422,24 +471,23 @@ class Q_Agent():
         self.q_table[tuple(old_state)][action] = (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value_in_new_state)
 
     def learn_with_greedy_target(self, old_state, reward, new_state, action, alpha=0.1):
+        """**Eq. 5.2:** Q(s,a) ← (1−α)Q(s,a) + α[R + γ max_{a′} Q(s′,a′)]
+
+        Off-policy extension: greedy bootstrap (Eq. 1.3), pessimistic behavior (Eq. 2.1).
         """
-        Off-policy learning: Behavior policy uses max-min with belief,
-        but target policy is GREEDY (like vanilla Q-learning).
-    
-        Key difference from pessimistic: In the Q-update, we use
-        max_a Q(s', a) instead of max-min over belief.
-        """
-        # Greedy target: just take max over all actions at new_state
+        # Eq. 1.3: Greedy bootstrap max_{a'} Q(s', a')
         max_q_value = max(self.q_table_withatt[tuple(new_state)].values())
     
-        # Standard Q-learning update (same as vanilla Q-learning)
         current_q_value = self.q_table_withatt[tuple(old_state)][action]
     
         self.q_table_withatt[tuple(old_state)][action] = \
             (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value)
     
     def find_maxmin_with_belief(self, q_table_true, q_table_withatt, next_state, policy, new_policy, belief):
-        """Compute max-min Bellman target with belief tracking."""
+        """**Eq. 2.6:** (T_{car}Q)(s,a) target = γ · max_{a′} min_{m ∈ M∩B_ε(s′)} Q(s′,a′)
+
+        Pessimistic Bellman target (Algorithm 4, Line 13; BP-DQN loss, tabular form).
+        """
         states = self.get_ball(next_state)
         possible_states = states_intersection(belief, states)
         values = dict()
@@ -449,7 +497,9 @@ class Q_Agent():
                 q_values_for_action = []
                 for state in possible_states:
                     q_values_for_action.append(q_table_withatt[state][action])
+                # min_{m ∈ M∩B} Q(m, a) for each action a
                 values[action] = min(q_values_for_action)
+            # max_{a'} over actions
             return max(values.values())
         elif len(possible_states) == 1:
             return max(q_table_withatt[list(possible_states)[0]].values())
@@ -457,14 +507,20 @@ class Q_Agent():
             return max(q_table_withatt[next_state].values())
 
     def learn_with_att_with_belief(self, old_state, reward, new_state, action, policy, new_policy, belief, alpha = 0.1):
-        """Updates the Q-value table using Q-learning with belief"""
+        """**Eq. 2.4 / Algorithm 1, Line 11:** Q(s,a) ← Q(s,a) + α[R + γ·target − Q(s,a)]
+
+        target from find_maxmin_with_belief (Eq. 2.6).
+        """
         max_q_value_in_new_state = self.find_maxmin_with_belief(self.q_table, self.q_table_withatt, tuple(new_state), policy, new_policy, belief)
         current_q_value = self.q_table_withatt[tuple(old_state)][action]
 
         self.q_table_withatt[tuple(old_state)][action] = (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value_in_new_state)
 
     def get_att_state(self, true_state, policy):
-        """Find worst-case perturbed state given policy."""
+        """**Eq. 2.2 / Algorithm 1, Line 6:** ω_π(s) = argmin_{s̃∈B_ε(s)} Q(s, π(s̃))
+
+        Worst-case perturbed state for pessimistic training.
+        """
         states = self.get_ball(true_state)
         values = dict()
         for i in states:
@@ -473,6 +529,10 @@ class Q_Agent():
         return att_state
 
     def pareto_update(self, policy):
+        """**Eq. 2.1 (iterative):** π(s) = argmax_a mean_{s̄∈B_ε(s)} Q(s̄,a) until convergence
+
+        Fixed-point policy initialization before pessimistic training.
+        """
         no_change = False
         old = dict()
         while not no_change:
@@ -499,6 +559,10 @@ class Q_Agent():
         return policy
 
     def get_policy(self, init = False):
+        """**Eq. 2.1 / Algorithm 1, Line 5:** π(s̃) = argmax_a mean_{s̄∈B_ε(s̃)} Q(s̄,a)
+
+        Tabular maximin policy (mean approximation over ε-ball).
+        """
         policy = dict()
         if init:
             for state in self.all_state:
@@ -516,12 +580,17 @@ class Q_Agent():
         return policy
 
     def get_policy_naive(self):
+        """**Eq. 4.2:** π(s) = argmax_a Q(s,a)"""
         policy = dict()
         for state in self.all_state:
             policy[state] = max(self.q_table_withatt[state], key = self.q_table_withatt[state].get)
         return policy
 
     def get_policy_with_belief(self, policy, belief):
+        """**Eq. 3.4 / Algorithm 5, Line 7:** π(s̃) = argmax_a min_{m∈M_t∩B_ε(s̃)} Q(m,a)
+
+        Code uses mean over M∩B when |M∩B|>1 (tabular approximation).
+        """
         new_policy = dict()
         value_min = dict()
         for state in self.all_state:
@@ -546,6 +615,10 @@ class Q_Agent():
         return new_policy
 
     def get_ball(self, state):
+        """**Eq. 1.4:** B_ε(s) = {s} ∪ {one-step neighbors on 5×5 grid}
+
+        Discrete ε-ball: L1 neighborhood for state perturbation constraint.
+        """
         x = state[0]
         y = state[1]
         states = []
@@ -560,9 +633,11 @@ class Q_Agent():
         states.append((x,y))
         return states
 
-# Define the routine - play vanilla
 def play(environment, agent, trials=500, max_steps_per_episode=1000, learn=False):
-    """The play function runs iterations and updates Q-values if desired."""
+    """**Eq. 4.1:** Q(s,a) ← (1−α)Q(s,a) + α[R + γ max_{a′} Q(s′,a′)]
+
+    Vanilla Q-learning episode loop with ε-greedy exploration (Eq. 2.3).
+    """
     reward_per_episode = []
 
     for trial in range(trials):
@@ -597,9 +672,9 @@ def play(environment, agent, trials=500, max_steps_per_episode=1000, learn=False
     return reward_per_episode
 
 def play_vanilla_test(environment, agent, trials=100, max_steps_per_episode=1000, measure_time=False, attack_model=None):
-    """
-    Test vanilla Q-learning (baseline).
-    Uses baseline Q-table.
+    """**Eq. 4.2:** a = argmax_a Q(s̃, a)
+
+    Test vanilla agent; optional attacker provides perturbed observation s̃.
     """
     reward_per_episode = []
     inference_times = []
@@ -658,18 +733,22 @@ def play_vanilla_test(environment, agent, trials=100, max_steps_per_episode=1000
     else:
         return reward_per_episode
 
-# Define the routine - states_intersection
 def states_intersection(current_belief, states):
+    """**Eq. 3.3 / Algorithm 2, Line 9:** M_{t+1} = M′_t ∩ B_ε(s̃)
+
+    Returns belief states that also lie in the ε-ball B_ε(s̃).
+    """
     new_belief = set()
     for state in states:
         if state in current_belief:
             new_belief.add(state)
     return new_belief
 
-# Define the routine - play_att_with_belief 
 def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, attack_model = None, measure_time=False):
-    """ LOGIC - from main.py
-    The play function runs iterations and updates Q-values if desired."""
+    """**Algorithm 1 + Algorithm 2:** Pessimistic Q-learning with belief update
+
+    Eq. 2.2 (ω_π), Eq. 3.4 (π with M_t), Eq. 2.6 (Q-update), Eq. 3.2–3.3 (belief).
+    """
     inference_times = []
     reward_per_episode = []
     if learn:
@@ -717,6 +796,7 @@ def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1
                     att_state = old_state
                 att_state = tuple(att_state)
             else:
+                # Eq. 2.2: Training-time attacker ω_π(s) = argmin_{s̃∈B_ε(s)} Q(s, π(s̃))
                 att_state = agent.get_att_state(old_state, agent.defender_policy)
                 
             if learn:
@@ -730,12 +810,14 @@ def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1
             
             action = agent.choose_action_att(environment.actions , att_state, eps)
             
+            # Eq. 3.2–3.3: Belief propagation and intersection with B_ε(s̃)
             possible_true_states = agent.get_ball(att_state)
             belief_before_action = states_intersection(belief, possible_true_states)
             belief = set()
             for state in belief_before_action:
                 belief.add(environment.take_action(state, action))
             
+            # Eq. 3.4: Update defender policy π from belief M_t
             new_policy = agent.get_policy_with_belief(agent.defender_policy, belief)
             
             # End timing AFTER full inference (belief + policy update)
@@ -767,11 +849,10 @@ def play_att_with_belief(environment, agent, trials=500, max_steps_per_episode=1
     else:
         return reward_per_episode
 
-# Nov-27-2025: New function - play_offpolicy_greedy_target
 def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_episode=1000, learn=False, measure_time=False, attack_model=None):
-    """
-    Off-policy approach: Behavior policy uses pessimistic max-min with belief tracking,
-    but target policy is Greedy (simple max over Q-values).
+    """**Eq. 5.1:** Behavior = pessimistic (Eq. 2.1–3.4); Target = greedy (Eq. 5.2)
+
+    Train with belief+maximin; test with Eq. 4.2 greedy on s̃ (no belief).
     """
     reward_per_episode = []
     inference_times = []
@@ -796,7 +877,7 @@ def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_e
             while step < max_steps_per_episode and game_over != True:
                 old_state = tuple(environment.current_location)
                 
-                # Behavior policy: pessimistic (worst-case over belief)
+                # Eq. 2.2: Worst-case perturbation during training
                 att_state = agent.get_att_state(old_state, agent.defender_policy)
                 
                 eps = linear_schedule_exp(0.01, 0.2, trials, trial)
@@ -816,7 +897,7 @@ def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_e
                 _, reward, terminated, truncated, _ = environment.step(action)
                 new_state = environment.current_location
                 
-                # TARGET POLICY: Use Greedy (this is the key difference!)
+                # Eq. 5.2: Off-policy greedy target update (not Eq. 2.6)
                 alpha = linear_schedule_exp(0.01, 0.1, trials, trial)
                 agent.learn_with_greedy_target(old_state, reward, new_state, action, alpha)
                 
@@ -831,7 +912,7 @@ def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_e
                     game_over = True
         
         else:
-            # TESTING: Just use Greedy (no belief tracking)
+            # TESTING: Eq. 4.2 — greedy on perturbed state, no belief (Eq. 3.4 skipped)
             while step < max_steps_per_episode and game_over != True:
                 old_state = tuple(environment.current_location)
                 
@@ -856,7 +937,7 @@ def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_e
                 if measure_time:
                     action_start_time = time.perf_counter()
                 
-                # Agent inference: get Q-values and select action
+                # Eq. 4.2: a = argmax_a Q(s̃, a)
                 q_values_of_state = agent.q_table_withatt[perturbed_state]
                 
                 # Greedy action selection
@@ -887,9 +968,8 @@ def play_offpolicy_greedy_target(environment, agent, trials=500, max_steps_per_e
     else:
         return reward_per_episode
 
-# Helper function for applying perturbations
 def apply_perturbation(state, perturbation_direction):
-    """Apply a perturbation to a state based on direction."""
+    """**Eq. 1.4:** s̃ ∈ B_ε(s) — map attack direction to perturbed grid cell"""
     x, y = state
     
     if perturbation_direction == 'UP':
@@ -908,10 +988,10 @@ def apply_perturbation(state, perturbation_direction):
     # If can't move or stay, return original state
     return state
 
-# Define the RL for training with attack vector 
 def train_RL_attack_with_belief(agentQ, agent_type='pessimistic', model_name='attacker'):
-    """
-    Train attacker against specific agent type.
+    """**Eq. 6.4 / Eq. 1.5:** min_ω Σ_t R̃(s_t, ω(s_t));  R̃(s,s̃) = −R(s, π(s̃))
+
+    Train DQN attacker ω on attacker MDP (PA-AD / Section 2.2).
     """
     print(f"\n{'='*70}")
     print(f"TRAINING ATTACKER AGAINST {agent_type.upper()} AGENT")
@@ -965,10 +1045,10 @@ def train_RL_attack_with_belief(agentQ, agent_type='pessimistic', model_name='at
     
     return model
 
-# New function CSV Logging
 def log_experiment_to_csv(experiment_number, results_dict, filename='gridworld_experiments.csv'):
-    """
-    Logs experiment results to a CSV file.
+    """**Eq. 7.1:** R̄ = (1/N) Σ_i R_i  — log empirical mean rewards and metrics to CSV
+
+    Infrastructure function; records experiment outputs (no learning update).
     """
     import csv
     import os
@@ -1025,11 +1105,8 @@ def log_experiment_to_csv(experiment_number, results_dict, filename='gridworld_e
     
     print(f"  ✓ Experiment {experiment_number} logged to {filename}")
 
-# NEW FUNCTION: Save Checkpoint
 def save_checkpoint(experiment_number, checkpoint_file='experiment_checkpoint.pkl'):
-    """
-    Save the current experiment number to a checkpoint file.
-    """
+    """Save the current experiment number to a checkpoint file."""
     import pickle
     import os
     
@@ -1041,11 +1118,8 @@ def save_checkpoint(experiment_number, checkpoint_file='experiment_checkpoint.pk
     with open(checkpoint_file, 'wb') as f:
         pickle.dump(checkpoint_data, f)
 
-# NEW FUNCTION: Load Checkpoint
 def load_checkpoint(checkpoint_file='experiment_checkpoint.pkl'):
-    """
-    Load the last completed experiment number from checkpoint file.
-    """
+    """Load the last completed experiment number from checkpoint file."""
     import pickle
     import os
     
@@ -1073,23 +1147,20 @@ def load_checkpoint(checkpoint_file='experiment_checkpoint.pkl'):
         print(f"\nNo checkpoint found. Starting from experiment 1.")
         return 0
 
-# NEW FUNCTION: Clear Checkpoint
 def clear_checkpoint(checkpoint_file='experiment_checkpoint.pkl'):
-    """
-    Clear the checkpoint file (call this when all experiments are complete).
-    """
+    """Clear the checkpoint file when all experiments are complete."""
     import os
     
     if os.path.exists(checkpoint_file):
         os.remove(checkpoint_file)
         print(f"✓ Checkpoint file '{checkpoint_file}' removed")
 
-# NEW FUNCTION: Check Progress
 def check_experiment_progress(csv_filename='gridworld_experiments.csv', 
                               checkpoint_file='experiment_checkpoint.pkl',
                               total_experiments=500):
-    """
-    Check the progress of experiments without running them.
+    """**Eq. 7.1:** R̄ = (1/N) Σ_i R_i  — report running mean rewards from CSV
+
+    Progress monitor; no learning update.
     """
     import os
     import pandas as pd
@@ -1139,10 +1210,10 @@ def check_experiment_progress(csv_filename='gridworld_experiments.csv',
     
     return completed
 
-# NEW FUNCTION: Analyze CSV Results
 def analyze_csv_results(csv_filename='gridworld_experiments.csv'):
-    """
-    Analyze results from the CSV file.
+    """**Eq. 7.1:** R̄ ± σ = mean ± std of per-experiment rewards
+
+    Summarize vanilla, pessimistic, and off-policy results from CSV.
     """
     import pandas as pd
     
@@ -1194,10 +1265,9 @@ def analyze_csv_results(csv_filename='gridworld_experiments.csv'):
     return df
 
 def play_pessimistic_clean(environment, agent, trials=100, max_steps_per_episode=1000, measure_time=False):
-    """
-    Test Pessimistic Q-Learning in CLEAN environment (NO attacker).
-    Agent acts greedily on TRUE states using trained Q-table.
-    NO belief tracking needed when there's no attacker.
+    """**Eq. 4.2:** a = argmax_a Q(s, a)  on true state s (no attacker, no belief)
+
+    Clean-environment test of trained q_table_withatt.
     """
     reward_per_episode = []
     inference_times = []
@@ -1244,9 +1314,9 @@ def play_pessimistic_clean(environment, agent, trials=100, max_steps_per_episode
         return reward_per_episode
 
 def run_single_experiment_with_seed(experiment_num, seed, attack_models=None):
-    """
-    Run ONE complete experiment with fixed random seed for fair comparison.
-    Tests three algorithms: Vanilla, Pessimistic (old), Off-Policy
+    """**Eq. 7.1–7.2:** Compare R̄ and speedup across vanilla / pessimistic / off-policy
+
+    Phase 1: Eq. 4.1 train | 1.5: Eq. 4.2 test | 2: Algorithm 1+2 | 3: Eq. 5.1–5.2
     """
     results = {}
     results['experiment_number'] = experiment_num

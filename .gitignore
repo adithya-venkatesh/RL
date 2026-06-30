@@ -1,5 +1,11 @@
-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
-*.csv
+__pycache__/
+*.py[cod]
+checkpoints/
+logs/
+*.pt
+*.zip
+*.pkl
 token*
 *.png
-
+*.csv
+!cartpole_experiments*.csv
