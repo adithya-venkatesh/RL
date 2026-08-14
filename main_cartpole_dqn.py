@@ -29,6 +29,16 @@ import torch.optim as optim
 from stable_baselines3 import DQN as SB3_DQN
 from stable_baselines3.common.callbacks import CheckpointCallback
 
+from cartpole_belief import (
+    BeliefRNN,
+    BeliefProvider,
+    UniformBallBelief,
+    load_belief_rnn,
+    make_belief_provider,
+    pretrain_belief_rnn_on_agent,
+    save_belief_rnn,
+)
+
 # CartPole-v1 observation limits used for clipping perturbed states (Eq. 1.4).
 CARTPOLE_LOW = np.array([-4.8, -5.0, -0.418, -5.0], dtype=np.float32)
 CARTPOLE_HIGH = np.array([4.8, 5.0, 0.418, 5.0], dtype=np.float32)
@@ -163,11 +173,18 @@ class CartPoleAttackEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, defender_agent: "DQNAgent", agent_type: str = "vanilla", epsilon: float = DEFAULT_ATTACK_EPS):
+    def __init__(
+        self,
+        defender_agent: "DQNAgent",
+        agent_type: str = "vanilla",
+        epsilon: float = DEFAULT_ATTACK_EPS,
+        belief_provider: Optional[BeliefProvider] = None,
+    ):
         self.defender = defender_agent
         self.agent_type = agent_type
         self.epsilon = epsilon
         self.kappa = DEFAULT_BELIEF_KAPPA
+        self.belief_provider = belief_provider
         self.inner = CartPoleDefenderEnv()
         self.action_space = gym.spaces.Discrete(N_DISCRETE_ATTACK_ACTIONS)
         self.observation_space = gym.spaces.Box(
@@ -178,13 +195,22 @@ class CartPoleAttackEnv(gym.Env):
 
     def _defender_action(self, perturbed_norm: np.ndarray) -> int:
         if self.agent_type == "pessimistic":
-            return self.defender.maximin_action(perturbed_norm, self.epsilon, self.kappa)
+            return self.defender.maximin_action(
+                perturbed_norm,
+                self.epsilon,
+                self.kappa,
+                belief_provider=self.belief_provider,
+            )
         return self.defender.greedy_action(perturbed_norm)
 
     def reset(self, *, seed=None, options=None):
         obs, info = self.inner.reset(seed=seed, options=options)
         self.perturbed_state = obs.copy()
-        self.belief = sample_ball(obs, self.epsilon, self.kappa)
+        if self.belief_provider is not None:
+            self.belief_provider.reset_episode()
+            self.belief = self.belief_provider.observe(obs)
+        else:
+            self.belief = sample_ball(obs, self.epsilon, self.kappa)
         return obs, info
 
     def step(self, action):
@@ -192,9 +218,14 @@ class CartPoleAttackEnv(gym.Env):
         true_norm = normalize_obs(self.inner.get_true_state())
         delta = delta_from_discrete_action(int(action), self.epsilon)
         self.perturbed_state = apply_perturbation(true_norm, delta, normalized=True)
+        if self.belief_provider is not None:
+            self.belief_provider.observe(self.perturbed_state)
         defender_action = self._defender_action(self.perturbed_state)
         obs, reward, terminated, truncated, info = self.inner.step(defender_action)
-        self.belief = sample_ball(obs, self.epsilon, self.kappa)
+        if self.belief_provider is not None:
+            self.belief = self.belief_provider.observe(obs)
+        else:
+            self.belief = sample_ball(obs, self.epsilon, self.kappa)
         attacker_reward = -float(reward)
         return obs, attacker_reward, terminated, truncated, info
 
@@ -375,9 +406,20 @@ class DQNAgent:
         """**Eq. 4.2:** a = argmax_a Q(s, a)"""
         return int(np.argmax(self.q_values(state)))
 
-    def maximin_action(self, center_state: np.ndarray, epsilon: float, kappa: int) -> int:
+    def maximin_action(
+        self,
+        center_state: np.ndarray,
+        epsilon: float,
+        kappa: int,
+        particles: Optional[List[np.ndarray]] = None,
+        belief_provider: Optional[BeliefProvider] = None,
+    ) -> int:
         """**Eq. 3.4 / Algorithm 5, Line 7:** a = argmax_a min_{m∈M∩B_ε(s̃)} Q(m,a)"""
-        particles = sample_ball(center_state, epsilon, kappa)
+        if particles is None:
+            if belief_provider is not None:
+                particles = belief_provider.particles_at(center_state)
+            else:
+                particles = sample_ball(center_state, epsilon, kappa)
         action_mins = []
         for a in range(self.n_actions):
             action_mins.append(min(self.q_value(p, a) for p in particles))
@@ -507,14 +549,20 @@ def train_vanilla_dqn(
     total_timesteps: int = 500_000,
     seed: int = 0,
     log_interval: int = 25_000,
+    eval_interval: int = 25_000,
+    eval_episodes: int = 20,
+    eval_seed_base: int = 8000,
 ) -> Tuple[DQNAgent, List[float]]:
-    """**Eq. 4.1:** Train vanilla DQN on CartPole-v1 (Phase 1 baseline)."""
+    """**Eq. 4.1:** Train vanilla DQN with mid-training eval + best-checkpoint restore."""
     set_seed(seed)
     env = CartPoleDefenderEnv()
     agent = DQNAgent()
     episode_returns: List[float] = []
     ep_return = 0.0
     episode_count = 0
+    best_snap: Optional[dict] = None
+    best_eval = -float("inf")
+    best_step = 0
 
     obs, _ = env.reset(seed=seed)
 
@@ -554,8 +602,110 @@ def train_vanilla_dqn(
                 flush=True,
             )
 
+        if step % eval_interval == 0:
+            greedy_mean = quick_eval_mean(
+                agent, eval_episodes, eval_seed_base + step, "vanilla"
+            )
+            print(f"  [eval @ {step}] greedy_clean={greedy_mean:.1f}", flush=True)
+            if greedy_mean >= best_eval:
+                best_eval = greedy_mean
+                best_step = step
+                best_snap = agent.snapshot_weights()
+
     env.close()
-    agent.update_target()
+    if best_snap is not None:
+        agent.restore_weights(best_snap)
+        print(
+            f"  restored best vanilla checkpoint from step {best_step} "
+            f"(greedy_clean={best_eval:.1f})",
+            flush=True,
+        )
+    else:
+        agent.update_target()
+    return agent, episode_returns
+
+
+def continue_vanilla_dqn(
+    agent: DQNAgent,
+    extra_timesteps: int,
+    seed: int,
+    log_interval: int = 25_000,
+    eval_interval: int = 25_000,
+    eval_episodes: int = 20,
+    eval_seed_base: int = 8500,
+) -> Tuple[DQNAgent, List[float]]:
+    """Continue vanilla DQN training with mid-eval + best-checkpoint restore."""
+    set_seed(seed)
+    env = CartPoleDefenderEnv()
+    episode_returns: List[float] = []
+    ep_return = 0.0
+    episode_count = 0
+    obs, _ = env.reset(seed=seed)
+    start_step = agent.total_steps
+    best_snap: Optional[dict] = agent.snapshot_weights()
+    best_eval = quick_eval_mean(agent, eval_episodes, eval_seed_base, "vanilla")
+    best_step = start_step
+    print(
+        f"  [continue start] greedy_clean={best_eval:.1f} (baseline checkpoint)",
+        flush=True,
+    )
+
+    for step in range(1, extra_timesteps + 1):
+        global_step = start_step + step
+        cfg = agent.config
+        epsilon = cfg.epsilon_end + (cfg.epsilon_start - cfg.epsilon_end) * math.exp(
+            -global_step / cfg.epsilon_decay_steps
+        )
+        action = agent.select_action(obs, epsilon)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        agent.replay_buffer.push(obs, action, reward, next_obs, done)
+        obs = next_obs
+        ep_return += reward
+        agent.total_steps = global_step
+
+        if step % cfg.train_freq == 0:
+            for _ in range(cfg.gradient_steps):
+                agent.train_step()
+
+        if done:
+            episode_returns.append(ep_return)
+            episode_count += 1
+            if episode_count % cfg.target_update_episodes == 0:
+                agent.update_target()
+            obs, _ = env.reset()
+            ep_return = 0.0
+
+        if step % log_interval == 0 and episode_returns:
+            recent = episode_returns[-100:]
+            print(
+                f"  continue step {step:>7}/{extra_timesteps} | mean_return(last {len(recent)})={np.mean(recent):.1f}",
+                flush=True,
+            )
+
+        if step % eval_interval == 0:
+            greedy_mean = quick_eval_mean(
+                agent, eval_episodes, eval_seed_base + global_step, "vanilla"
+            )
+            print(
+                f"  [continue eval @ {global_step}] greedy_clean={greedy_mean:.1f}",
+                flush=True,
+            )
+            if greedy_mean >= best_eval:
+                best_eval = greedy_mean
+                best_step = global_step
+                best_snap = agent.snapshot_weights()
+
+    env.close()
+    if best_snap is not None:
+        agent.restore_weights(best_snap)
+        print(
+            f"  restored best continue checkpoint from step {best_step} "
+            f"(greedy_clean={best_eval:.1f})",
+            flush=True,
+        )
+    else:
+        agent.update_target()
     return agent, episode_returns
 
 
@@ -643,6 +793,33 @@ def perturb_from_attacker(
     return apply_perturbation(true_obs, delta, normalized=True)
 
 
+def _defender_action_under_attack(
+    agent: DQNAgent,
+    true_obs: np.ndarray,
+    perturbed: np.ndarray,
+    mode: str,
+    epsilon: float,
+    kappa: int,
+    belief_provider: Optional[BeliefProvider] = None,
+    under_attack: bool = True,
+) -> int:
+    """Select defender action for clean, learned-attacker, or shared-random eval."""
+    if mode == "pessimistic" and under_attack:
+        if belief_provider is not None:
+            belief_provider.observe(perturbed)
+        return agent.maximin_action(
+            perturbed, epsilon, kappa, belief_provider=belief_provider
+        )
+    if mode == "pessimistic" and not under_attack:
+        s_tilde = agent.worst_case_perturbation(true_obs, epsilon)
+        return agent.maximin_action(
+            s_tilde, epsilon, kappa, belief_provider=belief_provider
+        )
+    if mode in ("offpolicy", "vanilla"):
+        return agent.greedy_action(perturbed if under_attack else true_obs)
+    return agent.greedy_action(true_obs)
+
+
 def evaluate_agent(
     agent: DQNAgent,
     n_episodes: int = 100,
@@ -651,22 +828,26 @@ def evaluate_agent(
     attacker=None,
     epsilon: float = DEFAULT_ATTACK_EPS,
     measure_time: bool = False,
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> Tuple[List[float], Optional[float]]:
-    """**Eq. 4.2 / Eq. 3.4:** Evaluate greedy, pessimistic, or off-policy inference."""
+    """Evaluate greedy / maximin policy (clean or vs learned DQN attacker)."""
     set_seed(seed)
     env = CartPoleDefenderEnv()
     returns: List[float] = []
     inference_times: List[float] = []
     kappa = agent.config.belief_kappa
+    under_attack = attacker is not None
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
+        if belief_provider is not None:
+            belief_provider.reset_episode()
         done = False
         ep_return = 0.0
 
         while not done:
             true_obs = obs
-            if attacker is not None:
+            if under_attack:
                 perturbed = perturb_from_attacker(true_obs, attacker, epsilon)
             else:
                 perturbed = true_obs
@@ -674,17 +855,16 @@ def evaluate_agent(
             if measure_time:
                 t0 = time.perf_counter()
 
-            if mode == "pessimistic" and attacker is not None:
-                action = agent.maximin_action(perturbed, epsilon, kappa)
-            elif mode == "offpolicy" or mode == "vanilla":
-                action = agent.greedy_action(perturbed if attacker is not None else true_obs)
-            else:
-                action = agent.greedy_action(true_obs)
+            action = _defender_action_under_attack(
+                agent, true_obs, perturbed, mode, epsilon, kappa, belief_provider, under_attack
+            )
 
             if measure_time:
                 inference_times.append(time.perf_counter() - t0)
 
             obs, reward, terminated, truncated, _ = env.step(action)
+            if belief_provider is not None:
+                belief_provider.observe(obs)
             ep_return += reward
             done = terminated or truncated
 
@@ -694,12 +874,87 @@ def evaluate_agent(
     return returns, avg_ms
 
 
+def evaluate_shared_random_attack(
+    agent: DQNAgent,
+    n_episodes: int = 100,
+    seed: int = 0,
+    mode: str = "vanilla",
+    epsilon: float = DEFAULT_ATTACK_EPS,
+    measure_time: bool = False,
+    belief_provider: Optional[BeliefProvider] = None,
+) -> Tuple[List[float], Optional[float]]:
+    """Shared threat model: identical δ stream per (seed, episode, step) across defenders.
+
+    Each defender runs its own rollout; at step t the same δ_t ~ Uniform(B_ε) is applied
+    to that defender's true state (fair fixed attack distribution).
+    """
+    set_seed(seed)
+    env = CartPoleDefenderEnv()
+    returns: List[float] = []
+    inference_times: List[float] = []
+    kappa = agent.config.belief_kappa
+
+    for ep in range(n_episodes):
+        rng = np.random.RandomState(seed + ep)
+        obs, _ = env.reset(seed=seed + ep)
+        if belief_provider is not None:
+            belief_provider.reset_episode()
+        done = False
+        ep_return = 0.0
+
+        while not done:
+            true_obs = obs
+            delta = rng.uniform(-epsilon, epsilon, size=4).astype(np.float32)
+            perturbed = apply_perturbation(true_obs, delta, normalized=True)
+
+            if measure_time:
+                t0 = time.perf_counter()
+
+            action = _defender_action_under_attack(
+                agent, true_obs, perturbed, mode, epsilon, kappa, belief_provider, under_attack=True
+            )
+
+            if measure_time:
+                inference_times.append(time.perf_counter() - t0)
+
+            obs, reward, terminated, truncated, _ = env.step(action)
+            if belief_provider is not None:
+                belief_provider.observe(obs)
+            ep_return += reward
+            done = terminated or truncated
+
+        returns.append(ep_return)
+    env.close()
+    avg_ms = float(np.mean(inference_times) * 1000) if measure_time and inference_times else None
+    return returns, avg_ms
+
+
+def _store_attack_metrics(
+    results: Dict,
+    prefix: str,
+    returns: List[float],
+    infer_ms: Optional[float],
+    clean_reward: float,
+) -> None:
+    """Write mean/std/inference and attack-to-clean ratio into results dict."""
+    mean_r = float(np.mean(returns))
+    results[f"{prefix}_avg_reward"] = mean_r
+    results[f"{prefix}_std"] = float(np.std(returns))
+    if infer_ms is not None:
+        results[f"{prefix}_inference_time_ms"] = infer_ms
+    if clean_reward > 0:
+        results[f"{prefix}_attack_clean_ratio"] = mean_r / clean_reward
+    else:
+        results[f"{prefix}_attack_clean_ratio"] = np.nan
+
+
 def _training_loop(
     agent: DQNAgent,
     total_timesteps: int,
     seed: int,
     mode: str,
     log_interval: int = 25_000,
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> List[float]:
     """Shared training loop for pessimistic and off-policy fine-tuning."""
     set_seed(seed)
@@ -708,6 +963,8 @@ def _training_loop(
     ep_return = 0.0
     episode_count = 0
     obs, _ = env.reset(seed=seed)
+    if belief_provider is not None:
+        belief_provider.reset_episode()
     cfg = agent.config
 
     for step in range(1, total_timesteps + 1):
@@ -717,15 +974,22 @@ def _training_loop(
         s_tilde = agent.worst_case_perturbation(obs, cfg.attack_epsilon)
         explore = np.random.random() < epsilon
         if mode in ("pessimistic", "offpolicy"):
-            action = np.random.randint(agent.n_actions) if explore else agent.maximin_action(
-                s_tilde, cfg.attack_epsilon, cfg.belief_kappa
+            action = (
+                np.random.randint(agent.n_actions)
+                if explore
+                else agent.maximin_action(
+                    s_tilde, cfg.attack_epsilon, cfg.belief_kappa, belief_provider=belief_provider
+                )
             )
         else:
             action = agent.select_action(obs, epsilon)
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
-        next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
+        if belief_provider is not None:
+            next_belief = belief_provider.observe(next_obs)
+        else:
+            next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
 
         if mode in ("pessimistic", "offpolicy"):
             agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
@@ -751,6 +1015,8 @@ def _training_loop(
             if episode_count % cfg.target_update_episodes == 0:
                 agent.update_target()
             obs, _ = env.reset()
+            if belief_provider is not None:
+                belief_provider.reset_episode()
             ep_return = 0.0
 
         if step % log_interval == 0 and episode_returns:
@@ -773,6 +1039,7 @@ def _training_loop_pessimistic(
     early_stop: bool = True,
     solve_threshold: float = 475.0,
     collapse_floor: float = 400.0,
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> Tuple[List[float], Dict]:
     """Pessimistic fine-tune with mid-training eval, best-checkpoint restore, and early stop."""
     set_seed(seed)
@@ -781,6 +1048,8 @@ def _training_loop_pessimistic(
     ep_return = 0.0
     episode_count = 0
     obs, _ = env.reset(seed=seed)
+    if belief_provider is not None:
+        belief_provider.reset_episode()
     cfg = agent.config
 
     meta: Dict = {
@@ -801,12 +1070,17 @@ def _training_loop_pessimistic(
         action = (
             np.random.randint(agent.n_actions)
             if explore
-            else agent.maximin_action(s_tilde, cfg.attack_epsilon, cfg.belief_kappa)
+            else agent.maximin_action(
+                s_tilde, cfg.attack_epsilon, cfg.belief_kappa, belief_provider=belief_provider
+            )
         )
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
-        next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
+        if belief_provider is not None:
+            next_belief = belief_provider.observe(next_obs)
+        else:
+            next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
         agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
         agent.replay_buffer.push(obs, action, reward, next_obs, done)
 
@@ -823,6 +1097,8 @@ def _training_loop_pessimistic(
             if episode_count % cfg.target_update_episodes == 0:
                 agent.update_target()
             obs, _ = env.reset()
+            if belief_provider is not None:
+                belief_provider.reset_episode()
             ep_return = 0.0
 
         if step % log_interval == 0 and episode_returns:
@@ -878,6 +1154,7 @@ def train_pessimistic_dqn(
     eval_interval: int = 25_000,
     eval_episodes: int = 20,
     early_stop: bool = True,
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> Tuple[List[float], Dict]:
     """**Algorithm 1 + 2:** Fine-tune DQN with pessimistic targets (Eq. 2.6)."""
     return _training_loop_pessimistic(
@@ -887,12 +1164,18 @@ def train_pessimistic_dqn(
         eval_interval=eval_interval,
         eval_episodes=eval_episodes,
         early_stop=early_stop,
+        belief_provider=belief_provider,
     )
 
 
-def train_offpolicy_greedy_dqn(agent: DQNAgent, total_timesteps: int = 100_000, seed: int = 0) -> List[float]:
+def train_offpolicy_greedy_dqn(
+    agent: DQNAgent,
+    total_timesteps: int = 100_000,
+    seed: int = 0,
+    belief_provider: Optional[BeliefProvider] = None,
+) -> List[float]:
     """**Eq. 5.1–5.2:** Pessimistic behavior, greedy bootstrap target."""
-    return _training_loop(agent, total_timesteps, seed, mode="offpolicy")
+    return _training_loop(agent, total_timesteps, seed, mode="offpolicy", belief_provider=belief_provider)
 
 
 def train_cartpole_attacker(
@@ -900,10 +1183,16 @@ def train_cartpole_attacker(
     agent_type: str = "vanilla",
     total_timesteps: int = 100_000,
     save_path: Optional[str] = None,
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> SB3_DQN:
     """**Eq. 6.4:** Train DQN attacker ω against fixed defender."""
     save_path = save_path or f"cartpole_attacker_{agent_type}"
-    env = CartPoleAttackEnv(defender, agent_type=agent_type, epsilon=defender.config.attack_epsilon)
+    env = CartPoleAttackEnv(
+        defender,
+        agent_type=agent_type,
+        epsilon=defender.config.attack_epsilon,
+        belief_provider=belief_provider,
+    )
     model = SB3_DQN(
         "MlpPolicy",
         env,
@@ -1129,6 +1418,7 @@ def seed_paths(seed: int, base_dir: str = "checkpoints") -> Dict[str, str]:
         "attacker_vanilla": os.path.join(d, "attacker_vanilla"),
         "attacker_pessimistic": os.path.join(d, "attacker_pessimistic"),
         "attacker_offpolicy": os.path.join(d, "attacker_offpolicy"),
+        "belief_rnn": os.path.join(d, "belief_rnn.pt"),
     }
 
 
@@ -1143,6 +1433,7 @@ def evaluate_pgd_worst_case(
     n_episodes: int,
     seed: int,
     mode: str = "vanilla",
+    belief_provider: Optional[BeliefProvider] = None,
 ) -> List[float]:
     """PGD-style worst-case perturbation eval (supplement to DQN attacker)."""
     set_seed(seed)
@@ -1153,15 +1444,21 @@ def evaluate_pgd_worst_case(
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
+        if belief_provider is not None:
+            belief_provider.reset_episode()
         done = False
         ep_return = 0.0
         while not done:
             s_tilde = agent.worst_case_perturbation(obs, eps)
             if mode == "pessimistic":
-                action = agent.maximin_action(s_tilde, eps, kappa)
+                action = agent.maximin_action(
+                    s_tilde, eps, kappa, belief_provider=belief_provider
+                )
             else:
                 action = agent.greedy_action(s_tilde)
             obs, reward, terminated, truncated, _ = env.step(action)
+            if belief_provider is not None:
+                belief_provider.observe(obs)
             ep_return += reward
             done = terminated or truncated
         returns.append(ep_return)
@@ -1169,43 +1466,128 @@ def evaluate_pgd_worst_case(
     return returns
 
 
+def train_vanilla_with_solve_gate(
+    total_timesteps: int,
+    seed: int,
+    eval_episodes: int = 100,
+    min_reward: float = 475.0,
+    max_retries: int = 2,
+    extra_steps: int = 200_000,
+) -> Tuple[DQNAgent, float, bool]:
+    """Train vanilla DQN with best-checkpoint restore; extend if final eval is below min_reward.
+
+    ``solved`` is always computed from the final returned evaluation mean (not a stale mid-gate).
+    """
+    steps = total_timesteps
+    vanilla, _ = train_vanilla_dqn(total_timesteps=steps, seed=seed)
+    mean_eval = 0.0
+    for attempt in range(max_retries + 1):
+        eval_returns, _ = evaluate_vanilla_dqn(vanilla, eval_episodes, seed + 1000)
+        mean_eval = float(np.mean(eval_returns))
+        solved = mean_eval >= min_reward
+        print(
+            f"  vanilla eval (attempt {attempt + 1}): mean={mean_eval:.1f} "
+            f"(threshold={min_reward:.0f}) -> {'PASS' if solved else 'RETRY'}",
+            flush=True,
+        )
+        if solved or attempt >= max_retries:
+            return vanilla, mean_eval, solved
+        vanilla, _ = continue_vanilla_dqn(vanilla, extra_steps, seed + 10_000 * (attempt + 1))
+    return vanilla, mean_eval, mean_eval >= min_reward
+
+
+def _make_eval_belief_provider(
+    belief_mode: str,
+    belief_model: Optional[BeliefRNN],
+    epsilon: float,
+    kappa: int,
+) -> Optional[BeliefProvider]:
+    if belief_mode == "uniform":
+        return UniformBallBelief(epsilon, kappa)
+    if belief_model is not None:
+        return make_belief_provider("learned", epsilon, kappa, belief_model)
+    return None
+
+
 CSV_FIELDNAMES = [
     "experiment_number",
     "timestamp",
     "seed",
+    "belief_mode",
+    "vanilla_solved",
+    "belief_pretrain_loss",
+    # Clean performance
     "vanilla_test_avg_reward",
     "vanilla_test_std",
     "vanilla_inference_time_ms",
-    "vanilla_vs_attacker_reward",
-    "vanilla_vs_attacker_std",
-    "vanilla_attack_inference_time_ms",
-    "vanilla_pgd_reward",
-    "vanilla_pgd_std",
-    "pessimistic_train_avg_reward",
-    "pessimistic_train_std",
     "pessimistic_test_avg_reward",
     "pessimistic_test_std",
     "pessimistic_test_maximin_avg_reward",
     "pessimistic_test_maximin_std",
-    "pessimistic_finetune_stopped_step",
-    "pessimistic_best_greedy_eval",
-    "pessimistic_early_stopped",
     "pessimistic_inference_time_ms",
-    "pessimistic_vs_attacker_reward",
-    "pessimistic_vs_attacker_std",
-    "pessimistic_attack_inference_time_ms",
-    "pessimistic_pgd_reward",
-    "pessimistic_pgd_std",
-    "offpolicy_greedy_train_avg_reward",
-    "offpolicy_greedy_train_std",
     "offpolicy_greedy_test_avg_reward",
     "offpolicy_greedy_test_std",
     "offpolicy_greedy_inference_time_ms",
+    # Matched attacker (primary fair eval: each vs own attacker)
+    "vanilla_vs_matched_attacker_avg_reward",
+    "vanilla_vs_matched_attacker_std",
+    "vanilla_vs_matched_attacker_inference_time_ms",
+    "vanilla_vs_matched_attacker_attack_clean_ratio",
+    "pessimistic_vs_matched_attacker_avg_reward",
+    "pessimistic_vs_matched_attacker_std",
+    "pessimistic_vs_matched_attacker_inference_time_ms",
+    "pessimistic_vs_matched_attacker_attack_clean_ratio",
+    "offpolicy_vs_matched_attacker_avg_reward",
+    "offpolicy_vs_matched_attacker_std",
+    "offpolicy_vs_matched_attacker_inference_time_ms",
+    "offpolicy_vs_matched_attacker_attack_clean_ratio",
+    # Shared random-δ attack (identical threat distribution)
+    "vanilla_vs_shared_random_avg_reward",
+    "vanilla_vs_shared_random_std",
+    "vanilla_vs_shared_random_inference_time_ms",
+    "vanilla_vs_shared_random_attack_clean_ratio",
+    "pessimistic_vs_shared_random_avg_reward",
+    "pessimistic_vs_shared_random_std",
+    "pessimistic_vs_shared_random_inference_time_ms",
+    "pessimistic_vs_shared_random_attack_clean_ratio",
+    "offpolicy_vs_shared_random_avg_reward",
+    "offpolicy_vs_shared_random_std",
+    "offpolicy_vs_shared_random_inference_time_ms",
+    "offpolicy_vs_shared_random_attack_clean_ratio",
+    # Transfer eval (GridWorld parity: greedy vanilla vs att_p)
+    "vanilla_vs_transfer_attacker_avg_reward",
+    "vanilla_vs_transfer_attacker_std",
+    "vanilla_vs_transfer_attacker_inference_time_ms",
+    "vanilla_vs_transfer_attacker_attack_clean_ratio",
+    # PGD worst-case (defender-specific)
+    "vanilla_pgd_reward",
+    "vanilla_pgd_std",
+    "vanilla_pgd_attack_clean_ratio",
+    "pessimistic_pgd_reward",
+    "pessimistic_pgd_std",
+    "pessimistic_pgd_attack_clean_ratio",
+    "offpolicy_pgd_reward",
+    "offpolicy_pgd_std",
+    "offpolicy_pgd_attack_clean_ratio",
+    # Training metadata
+    "pessimistic_train_avg_reward",
+    "pessimistic_train_std",
+    "pessimistic_finetune_stopped_step",
+    "pessimistic_best_greedy_eval",
+    "pessimistic_early_stopped",
+    "offpolicy_greedy_train_avg_reward",
+    "offpolicy_greedy_train_std",
+    # Legacy aliases (backward compat for old CSV readers)
+    "vanilla_vs_attacker_reward",
+    "vanilla_vs_attacker_std",
+    "vanilla_attack_inference_time_ms",
+    "pessimistic_vs_attacker_reward",
+    "pessimistic_vs_attacker_std",
+    "pessimistic_attack_inference_time_ms",
     "offpolicy_greedy_vs_attacker_reward",
     "offpolicy_greedy_vs_attacker_std",
     "offpolicy_attack_inference_time_ms",
-    "offpolicy_pgd_reward",
-    "offpolicy_pgd_std",
+    # Summary diffs
     "performance_diff_offpolicy_vs_pessimistic",
     "performance_diff_offpolicy_vs_vanilla",
     "performance_diff_pessimistic_vs_vanilla",
@@ -1274,14 +1656,27 @@ def run_single_experiment_with_seed(
     attack_steps: int = 80_000,
     eval_episodes: int = 100,
     checkpoint_base_dir: str = "checkpoints",
+    belief_mode: str = "learned",
+    belief_pretrain_steps: int = 30_000,
+    vanilla_min_reward: float = 475.0,
 ) -> Dict:
     """Full fair pipeline for one seed (mirrors GridWorld run_single_experiment_with_seed)."""
     paths = ensure_seed_dir(seed, checkpoint_base_dir)
-    results: Dict = {"experiment_number": experiment_num, "seed": seed, "error": ""}
+    results: Dict = {
+        "experiment_number": experiment_num,
+        "seed": seed,
+        "belief_mode": belief_mode,
+        "error": "",
+    }
+    cfg_eps = DEFAULT_ATTACK_EPS
+    cfg_kappa = DEFAULT_BELIEF_KAPPA
 
-    print(f"\n[Exp {experiment_num + 1}] Phase 1: Training vanilla DQN (seed={seed})...")
-    vanilla, _ = train_vanilla_dqn(total_timesteps=vanilla_steps, seed=seed)
+    print(f"\n[Exp {experiment_num + 1}] Phase 1: Training vanilla DQN (seed={seed}, solve gate ≥{vanilla_min_reward})...")
+    vanilla, vanilla_eval, vanilla_solved = train_vanilla_with_solve_gate(
+        vanilla_steps, seed, eval_episodes, vanilla_min_reward
+    )
     vanilla.save(paths["vanilla"])
+    results["vanilla_solved"] = int(vanilla_solved)
 
     print(f"[Exp {experiment_num + 1}] Phase 1.5: Evaluating vanilla...")
     v_clean, v_clean_ms = evaluate_agent(
@@ -1290,12 +1685,37 @@ def run_single_experiment_with_seed(
     results["vanilla_test_avg_reward"] = float(np.mean(v_clean))
     results["vanilla_test_std"] = float(np.std(v_clean))
     results["vanilla_inference_time_ms"] = v_clean_ms
+    # Keep solved flag consistent with the reported clean eval (not a stale gate pass).
+    results["vanilla_solved"] = int(results["vanilla_test_avg_reward"] >= vanilla_min_reward)
 
-    print(f"[Exp {experiment_num + 1}] Phase 2: Training pessimistic DQN...")
+    belief_model: Optional[BeliefRNN] = None
+    if belief_mode == "learned":
+        print(f"[Exp {experiment_num + 1}] Phase 1.75: Pretraining Belief RNN ({belief_pretrain_steps} steps)...")
+        belief_model = BeliefRNN(kappa=cfg_kappa).to(torch.device(vanilla.config.device))
+        pretrain_loss = pretrain_belief_rnn_on_agent(
+            vanilla,
+            belief_model,
+            CartPoleDefenderEnv,
+            timesteps=belief_pretrain_steps,
+            seed=seed + 1500,
+            epsilon=cfg_eps,
+            set_seed_fn=set_seed,
+        )
+        save_belief_rnn(belief_model, paths["belief_rnn"])
+        results["belief_pretrain_loss"] = float(pretrain_loss)
+    else:
+        results["belief_pretrain_loss"] = np.nan
+
+    train_belief = _make_eval_belief_provider(belief_mode, belief_model, cfg_eps, cfg_kappa)
+    eval_belief = _make_eval_belief_provider(belief_mode, belief_model, cfg_eps, cfg_kappa)
+
+    print(f"[Exp {experiment_num + 1}] Phase 2: Training pessimistic DQN (belief={belief_mode})...")
     pes = DQNAgent(config=vanilla.config)
     pes.clone_weights_from(vanilla)
     pes.prepare_robust_finetune(freeze_backbone=True)
-    pes_train, pes_meta = train_pessimistic_dqn(pes, finetune_pessimistic, seed + 2000)
+    pes_train, pes_meta = train_pessimistic_dqn(
+        pes, finetune_pessimistic, seed + 2000, belief_provider=train_belief
+    )
     pes.save(paths["pessimistic"])
     results["pessimistic_train_avg_reward"] = float(np.mean(pes_train[-100:])) if pes_train else np.nan
     results["pessimistic_train_std"] = float(np.std(pes_train[-100:])) if pes_train else np.nan
@@ -1306,8 +1726,8 @@ def run_single_experiment_with_seed(
     p_clean, p_clean_ms = evaluate_agent(
         pes, eval_episodes, seed + 3000, "vanilla", measure_time=True
     )
-    p_clean_mm, p_clean_mm_ms = evaluate_agent(
-        pes, eval_episodes, seed + 3100, "pessimistic", measure_time=True
+    p_clean_mm, _ = evaluate_agent(
+        pes, eval_episodes, seed + 3100, "pessimistic", measure_time=True, belief_provider=eval_belief
     )
     results["pessimistic_test_avg_reward"] = float(np.mean(p_clean))
     results["pessimistic_test_std"] = float(np.std(p_clean))
@@ -1319,7 +1739,10 @@ def run_single_experiment_with_seed(
     off = DQNAgent(config=vanilla.config)
     off.clone_weights_from(vanilla)
     off.prepare_offpolicy_finetune()
-    off_train = train_offpolicy_greedy_dqn(off, finetune_offpolicy, seed + 4000)
+    train_belief_off = _make_eval_belief_provider(belief_mode, belief_model, cfg_eps, cfg_kappa)
+    off_train = train_offpolicy_greedy_dqn(
+        off, finetune_offpolicy, seed + 4000, belief_provider=train_belief_off
+    )
     off.save(paths["offpolicy"])
     results["offpolicy_greedy_train_avg_reward"] = float(np.mean(off_train[-100:])) if off_train else np.nan
     results["offpolicy_greedy_train_std"] = float(np.std(off_train[-100:])) if off_train else np.nan
@@ -1333,76 +1756,203 @@ def run_single_experiment_with_seed(
 
     print(f"[Exp {experiment_num + 1}] Phase 4: Training per-seed DQN attackers...")
     train_cartpole_attacker(vanilla, "vanilla", attack_steps, paths["attacker_vanilla"])
-    train_cartpole_attacker(pes, "pessimistic", attack_steps, paths["attacker_pessimistic"])
+    train_cartpole_attacker(
+        pes, "pessimistic", attack_steps, paths["attacker_pessimistic"], belief_provider=eval_belief
+    )
     train_cartpole_attacker(off, "offpolicy", attack_steps, paths["attacker_offpolicy"])
 
+    return _run_fair_eval_suite(
+        vanilla, pes, off, results, seed, eval_episodes, eval_belief, paths,
+        experiment_num, train_attackers_if_missing=False, attack_steps=attack_steps,
+        refresh_clean=False,
+    )
+
+
+def _run_fair_eval_suite(
+    vanilla: DQNAgent,
+    pes: DQNAgent,
+    off: DQNAgent,
+    results: Dict,
+    seed: int,
+    eval_episodes: int,
+    eval_belief: Optional[BeliefProvider],
+    paths: Dict[str, str],
+    experiment_num: int,
+    train_attackers_if_missing: bool = True,
+    attack_steps: int = 80_000,
+    refresh_clean: bool = True,
+) -> Dict:
+    """Run clean + matched + shared + transfer + PGD eval (Phases 5–6)."""
+    exp_label = f"[Exp {experiment_num + 1}]"
+
+    if refresh_clean:
+        print(f"{exp_label} Evaluating clean performance...")
+        v_clean, v_clean_ms = evaluate_agent(vanilla, eval_episodes, seed + 1000, "vanilla", measure_time=True)
+        results["vanilla_test_avg_reward"] = float(np.mean(v_clean))
+        results["vanilla_test_std"] = float(np.std(v_clean))
+        results["vanilla_inference_time_ms"] = v_clean_ms
+
+        p_clean, p_clean_ms = evaluate_agent(pes, eval_episodes, seed + 3000, "vanilla", measure_time=True)
+        p_clean_mm, _ = evaluate_agent(
+            pes, eval_episodes, seed + 3100, "pessimistic", measure_time=True, belief_provider=eval_belief
+        )
+        results["pessimistic_test_avg_reward"] = float(np.mean(p_clean))
+        results["pessimistic_test_std"] = float(np.std(p_clean))
+        results["pessimistic_test_maximin_avg_reward"] = float(np.mean(p_clean_mm))
+        results["pessimistic_test_maximin_std"] = float(np.std(p_clean_mm))
+        results["pessimistic_inference_time_ms"] = p_clean_ms
+
+        o_clean, o_clean_ms = evaluate_agent(off, eval_episodes, seed + 5000, "vanilla", measure_time=True)
+        results["offpolicy_greedy_test_avg_reward"] = float(np.mean(o_clean))
+        results["offpolicy_greedy_test_std"] = float(np.std(o_clean))
+        results["offpolicy_greedy_inference_time_ms"] = o_clean_ms
+
+    att_v_path = paths["attacker_vanilla"] + ".zip"
+    att_p_path = paths["attacker_pessimistic"] + ".zip"
+    att_o_path = paths["attacker_offpolicy"] + ".zip"
+    if train_attackers_if_missing and (
+        not os.path.exists(att_v_path) or not os.path.exists(att_p_path) or not os.path.exists(att_o_path)
+    ):
+        print(f"{exp_label} Training attackers (missing checkpoints)...")
+        train_cartpole_attacker(vanilla, "vanilla", attack_steps, paths["attacker_vanilla"])
+        train_cartpole_attacker(
+            pes, "pessimistic", attack_steps, paths["attacker_pessimistic"], belief_provider=eval_belief
+        )
+        train_cartpole_attacker(off, "offpolicy", attack_steps, paths["attacker_offpolicy"])
+
+    att_v = SB3_DQN.load(paths["attacker_vanilla"])
     att_p = SB3_DQN.load(paths["attacker_pessimistic"])
     att_o = SB3_DQN.load(paths["attacker_offpolicy"])
 
-    print(f"[Exp {experiment_num + 1}] Phase 5: Adversarial evaluation...")
-    # GridWorld parity: vanilla tested with pessimistic's attacker
-    v_att, v_att_ms = evaluate_agent(
-        vanilla, eval_episodes, seed + 6000, "vanilla", att_p, measure_time=True
-    )
-    results["vanilla_vs_attacker_reward"] = float(np.mean(v_att))
-    results["vanilla_vs_attacker_std"] = float(np.std(v_att))
-    results["vanilla_attack_inference_time_ms"] = v_att_ms
+    v_clean_mean = results["vanilla_test_avg_reward"]
+    p_clean_mean = results["pessimistic_test_avg_reward"]
+    o_clean_mean = results["offpolicy_greedy_test_avg_reward"]
 
-    p_att, p_att_ms = evaluate_agent(
-        pes, eval_episodes, seed + 7000, "pessimistic", att_p, measure_time=True
+    print(f"{exp_label} Phase 5a: Matched attacker eval...")
+    v_matched, v_matched_ms = evaluate_agent(
+        vanilla, eval_episodes, seed + 6000, "vanilla", att_v, measure_time=True
     )
-    results["pessimistic_vs_attacker_reward"] = float(np.mean(p_att))
-    results["pessimistic_vs_attacker_std"] = float(np.std(p_att))
-    results["pessimistic_attack_inference_time_ms"] = p_att_ms
+    _store_attack_metrics(results, "vanilla_vs_matched_attacker", v_matched, v_matched_ms, v_clean_mean)
 
-    o_att, o_att_ms = evaluate_agent(
+    p_matched, p_matched_ms = evaluate_agent(
+        pes, eval_episodes, seed + 7000, "pessimistic", att_p, measure_time=True, belief_provider=eval_belief
+    )
+    _store_attack_metrics(results, "pessimistic_vs_matched_attacker", p_matched, p_matched_ms, p_clean_mean)
+
+    o_matched, o_matched_ms = evaluate_agent(
         off, eval_episodes, seed + 8000, "offpolicy", att_o, measure_time=True
     )
-    results["offpolicy_greedy_vs_attacker_reward"] = float(np.mean(o_att))
-    results["offpolicy_greedy_vs_attacker_std"] = float(np.std(o_att))
-    results["offpolicy_attack_inference_time_ms"] = o_att_ms
+    _store_attack_metrics(results, "offpolicy_vs_matched_attacker", o_matched, o_matched_ms, o_clean_mean)
 
-    print(f"[Exp {experiment_num + 1}] Phase 6: PGD worst-case evaluation...")
+    print(f"{exp_label} Phase 5b: Shared random-δ attack...")
+    shared_seed = seed + 8500
+    v_shared, v_shared_ms = evaluate_shared_random_attack(
+        vanilla, eval_episodes, shared_seed, "vanilla", measure_time=True
+    )
+    _store_attack_metrics(results, "vanilla_vs_shared_random", v_shared, v_shared_ms, v_clean_mean)
+
+    p_shared, p_shared_ms = evaluate_shared_random_attack(
+        pes, eval_episodes, shared_seed, "pessimistic", measure_time=True, belief_provider=eval_belief
+    )
+    _store_attack_metrics(results, "pessimistic_vs_shared_random", p_shared, p_shared_ms, p_clean_mean)
+
+    o_shared, o_shared_ms = evaluate_shared_random_attack(
+        off, eval_episodes, shared_seed, "offpolicy", measure_time=True
+    )
+    _store_attack_metrics(results, "offpolicy_vs_shared_random", o_shared, o_shared_ms, o_clean_mean)
+
+    print(f"{exp_label} Phase 5c: Transfer eval (vanilla vs att_p)...")
+    v_transfer, v_transfer_ms = evaluate_agent(
+        vanilla, eval_episodes, seed + 6500, "vanilla", att_p, measure_time=True
+    )
+    _store_attack_metrics(results, "vanilla_vs_transfer_attacker", v_transfer, v_transfer_ms, v_clean_mean)
+
+    results["vanilla_vs_attacker_reward"] = results["vanilla_vs_transfer_attacker_avg_reward"]
+    results["vanilla_vs_attacker_std"] = results["vanilla_vs_transfer_attacker_std"]
+    results["vanilla_attack_inference_time_ms"] = results["vanilla_vs_transfer_attacker_inference_time_ms"]
+    results["pessimistic_vs_attacker_reward"] = results["pessimistic_vs_matched_attacker_avg_reward"]
+    results["pessimistic_vs_attacker_std"] = results["pessimistic_vs_matched_attacker_std"]
+    results["pessimistic_attack_inference_time_ms"] = results["pessimistic_vs_matched_attacker_inference_time_ms"]
+    results["offpolicy_greedy_vs_attacker_reward"] = results["offpolicy_vs_matched_attacker_avg_reward"]
+    results["offpolicy_greedy_vs_attacker_std"] = results["offpolicy_vs_matched_attacker_std"]
+    results["offpolicy_attack_inference_time_ms"] = results["offpolicy_vs_matched_attacker_inference_time_ms"]
+
+    print(f"{exp_label} Phase 6: PGD worst-case...")
     v_pgd = evaluate_pgd_worst_case(vanilla, eval_episodes, seed + 9000, "vanilla")
     results["vanilla_pgd_reward"] = float(np.mean(v_pgd))
     results["vanilla_pgd_std"] = float(np.std(v_pgd))
+    results["vanilla_pgd_attack_clean_ratio"] = results["vanilla_pgd_reward"] / v_clean_mean if v_clean_mean > 0 else np.nan
 
-    p_pgd = evaluate_pgd_worst_case(pes, eval_episodes, seed + 9100, "pessimistic")
+    p_pgd = evaluate_pgd_worst_case(
+        pes, eval_episodes, seed + 9100, "pessimistic", belief_provider=eval_belief
+    )
     results["pessimistic_pgd_reward"] = float(np.mean(p_pgd))
     results["pessimistic_pgd_std"] = float(np.std(p_pgd))
+    results["pessimistic_pgd_attack_clean_ratio"] = results["pessimistic_pgd_reward"] / p_clean_mean if p_clean_mean > 0 else np.nan
 
     o_pgd = evaluate_pgd_worst_case(off, eval_episodes, seed + 9200, "vanilla")
     results["offpolicy_pgd_reward"] = float(np.mean(o_pgd))
     results["offpolicy_pgd_std"] = float(np.std(o_pgd))
+    results["offpolicy_pgd_attack_clean_ratio"] = results["offpolicy_pgd_reward"] / o_clean_mean if o_clean_mean > 0 else np.nan
 
-    results["performance_diff_offpolicy_vs_pessimistic"] = (
-        results["offpolicy_greedy_test_avg_reward"] - results["pessimistic_test_avg_reward"]
+    results["performance_diff_offpolicy_vs_pessimistic"] = o_clean_mean - p_clean_mean
+    results["performance_diff_offpolicy_vs_vanilla"] = o_clean_mean - v_clean_mean
+    results["performance_diff_pessimistic_vs_vanilla"] = p_clean_mean - v_clean_mean
+    results["speedup_offpolicy_vs_pessimistic"] = (
+        p_matched_ms / o_matched_ms if p_matched_ms and o_matched_ms else np.nan
     )
-    results["performance_diff_offpolicy_vs_vanilla"] = (
-        results["offpolicy_greedy_test_avg_reward"] - results["vanilla_test_avg_reward"]
+    results["speedup_offpolicy_vs_vanilla"] = (
+        v_matched_ms / o_matched_ms if v_matched_ms and o_matched_ms else np.nan
     )
-    results["performance_diff_pessimistic_vs_vanilla"] = (
-        results["pessimistic_test_avg_reward"] - results["vanilla_test_avg_reward"]
-    )
-    if p_att_ms and p_att_ms > 0:
-        results["speedup_offpolicy_vs_pessimistic"] = p_att_ms / o_att_ms if o_att_ms else np.nan
-    else:
-        results["speedup_offpolicy_vs_pessimistic"] = np.nan
-    if v_att_ms and v_att_ms > 0:
-        results["speedup_offpolicy_vs_vanilla"] = v_att_ms / o_att_ms if o_att_ms else np.nan
-    else:
-        results["speedup_offpolicy_vs_vanilla"] = np.nan
 
-    print(f"\n[Exp {experiment_num + 1}] Summary:")
-    print(f"  Vanilla     clean={results['vanilla_test_avg_reward']:.1f}  "
-          f"attack={results['vanilla_vs_attacker_reward']:.1f}  pgd={results['vanilla_pgd_reward']:.1f}")
-    print(f"  Pessimistic clean={results['pessimistic_test_avg_reward']:.1f} (greedy) / "
-          f"{results['pessimistic_test_maximin_avg_reward']:.1f} (maximin)  "
-          f"attack={results['pessimistic_vs_attacker_reward']:.1f}  pgd={results['pessimistic_pgd_reward']:.1f}")
-    print(f"  Off-Policy  clean={results['offpolicy_greedy_test_avg_reward']:.1f}  "
-          f"attack={results['offpolicy_greedy_vs_attacker_reward']:.1f}  pgd={results['offpolicy_pgd_reward']:.1f}")
-
+    print(f"\n{exp_label} Summary:")
+    print(f"  Vanilla     clean={v_clean_mean:.1f}  matched={results['vanilla_vs_matched_attacker_avg_reward']:.1f}  "
+          f"shared={results['vanilla_vs_shared_random_avg_reward']:.1f}  pgd={results['vanilla_pgd_reward']:.1f}")
+    print(f"  Pessimistic clean={p_clean_mean:.1f}  matched={results['pessimistic_vs_matched_attacker_avg_reward']:.1f}  "
+          f"shared={results['pessimistic_vs_shared_random_avg_reward']:.1f}  pgd={results['pessimistic_pgd_reward']:.1f}")
+    print(f"  Off-Policy  clean={o_clean_mean:.1f}  matched={results['offpolicy_vs_matched_attacker_avg_reward']:.1f}  "
+          f"shared={results['offpolicy_vs_shared_random_avg_reward']:.1f}  pgd={results['offpolicy_pgd_reward']:.1f}")
     return results
+
+
+def run_eval_only_from_seed(
+    experiment_num: int,
+    seed: int,
+    eval_episodes: int = 100,
+    checkpoint_base_dir: str = "checkpoints",
+    belief_mode: str = "learned",
+    attack_steps: int = 80_000,
+) -> Dict:
+    """Re-run fair eval from saved checkpoints (no retraining)."""
+    paths = ensure_seed_dir(seed, checkpoint_base_dir)
+    results: Dict = {
+        "experiment_number": experiment_num,
+        "seed": seed,
+        "belief_mode": belief_mode,
+        "error": "",
+    }
+    for key in ("vanilla", "pessimistic", "offpolicy"):
+        if not os.path.exists(paths[key]):
+            raise FileNotFoundError(f"Missing checkpoint: {paths[key]}")
+
+    vanilla = DQNAgent()
+    vanilla.load(paths["vanilla"])
+    pes = DQNAgent(config=vanilla.config)
+    pes.load(paths["pessimistic"])
+    off = DQNAgent(config=vanilla.config)
+    off.load(paths["offpolicy"])
+
+    belief_model: Optional[BeliefRNN] = None
+    if belief_mode == "learned" and os.path.exists(paths["belief_rnn"]):
+        belief_model = load_belief_rnn(paths["belief_rnn"])
+        results["belief_pretrain_loss"] = np.nan
+    eval_belief = _make_eval_belief_provider(belief_mode, belief_model, DEFAULT_ATTACK_EPS, DEFAULT_BELIEF_KAPPA)
+
+    results["vanilla_solved"] = int(results.get("vanilla_solved", 1))
+    return _run_fair_eval_suite(
+        vanilla, pes, off, results, seed, eval_episodes, eval_belief, paths,
+        experiment_num, train_attackers_if_missing=True, attack_steps=attack_steps,
+    )
 
 
 def run_experiment_loop(
@@ -1416,6 +1966,10 @@ def run_experiment_loop(
     csv_filename: str = "cartpole_experiments.csv",
     checkpoint_file: str = "cartpole_experiment_checkpoint.pkl",
     resume: bool = False,
+    belief_mode: str = "learned",
+    belief_pretrain_steps: int = 30_000,
+    vanilla_min_reward: float = 475.0,
+    eval_only: bool = False,
 ) -> None:
     """Run N independent seeds with CSV logging and checkpoint resume."""
     start_exp = 0
@@ -1426,12 +1980,16 @@ def run_experiment_loop(
             csv_filename = ckpt_csv
             print(f"Resuming from experiment {start_exp + 1} (csv={csv_filename})")
 
+    mode_label = "EVAL-ONLY (fair re-eval from checkpoints)" if eval_only else "FAIR MULTI-SEED EXPERIMENTS"
     print("=" * 70)
-    print(f"CARTPOLE DQN — MULTI-SEED EXPERIMENTS ({num_experiments} total)")
+    print(f"CARTPOLE DQN — {mode_label} ({num_experiments} total)")
     print("=" * 70)
-    print(f"  Seeds:        {base_seed} .. {base_seed + num_experiments - 1}")
-    print(f"  CSV:          {csv_filename}")
-    print(f"  Eval episodes:{eval_episodes}")
+    print(f"  Seeds:           {base_seed} .. {base_seed + num_experiments - 1}")
+    print(f"  CSV:             {csv_filename}")
+    print(f"  Belief:          {belief_mode}")
+    print(f"  Vanilla gate:    ≥{vanilla_min_reward}")
+    print(f"  Eval episodes:   {eval_episodes}")
+    print(f"  Attack eval:     matched + shared-random + transfer + PGD")
     print("=" * 70)
 
     last_completed = start_exp - 1
@@ -1442,15 +2000,27 @@ def run_experiment_loop(
         print(f"{'=' * 70}")
 
         try:
-            results = run_single_experiment_with_seed(
-                experiment_num=exp_num,
-                seed=seed,
-                vanilla_steps=vanilla_steps,
-                finetune_pessimistic=finetune_pessimistic,
-                finetune_offpolicy=finetune_offpolicy,
-                attack_steps=attack_steps,
-                eval_episodes=eval_episodes,
-            )
+            if eval_only:
+                results = run_eval_only_from_seed(
+                    experiment_num=exp_num,
+                    seed=seed,
+                    eval_episodes=eval_episodes,
+                    belief_mode=belief_mode,
+                    attack_steps=attack_steps,
+                )
+            else:
+                results = run_single_experiment_with_seed(
+                    experiment_num=exp_num,
+                    seed=seed,
+                    vanilla_steps=vanilla_steps,
+                    finetune_pessimistic=finetune_pessimistic,
+                    finetune_offpolicy=finetune_offpolicy,
+                    attack_steps=attack_steps,
+                    eval_episodes=eval_episodes,
+                    belief_mode=belief_mode,
+                    belief_pretrain_steps=belief_pretrain_steps,
+                    vanilla_min_reward=vanilla_min_reward,
+                )
             log_experiment_to_csv(exp_num, results, csv_filename)
             save_experiment_checkpoint(exp_num, checkpoint_file, csv_filename)
             last_completed = exp_num
@@ -1475,6 +2045,128 @@ def run_experiment_loop(
         print(f"Results: {csv_filename}")
         print(f"{'=' * 70}")
         analyze_cartpole_csv(csv_filename)
+        compare_narratives(csv_filename)
+
+
+GRIDWORLD_REFERENCE = {
+    "vanilla_clean": 7.35,
+    "vanilla_attack": -682.14,
+    "pessimistic_clean": 7.35,
+    "pessimistic_attack": -21.76,
+    "offpolicy_clean": 7.37,
+    "offpolicy_attack": -551.88,
+}
+
+
+def compare_narratives(csv_filename: str = "cartpole_experiments.csv") -> None:
+    """Compare CartPole results against GridWorld narrative using fair eval columns."""
+    import pandas as pd
+
+    if not os.path.exists(csv_filename):
+        print(f"No CSV for narrative comparison: {csv_filename}")
+        return
+
+    df = pd.read_csv(csv_filename)
+    ok = df[df["error"].fillna("") == ""] if "error" in df.columns else df
+    if len(ok) == 0:
+        print("No successful CartPole runs to compare.")
+        return
+
+    def _col(primary: str, fallback: str) -> str:
+        return primary if primary in ok.columns else fallback
+
+    def _mean(col: str) -> float:
+        if col not in ok.columns:
+            return float("nan")
+        return float(ok[col].dropna().mean())
+
+    gw = GRIDWORLD_REFERENCE
+
+    print("\n" + "=" * 70)
+    print("NARRATIVE COMPARISON — FAIR EVAL (CartPole vs GridWorld reference)")
+    print("=" * 70)
+
+    eval_suites = [
+        (
+            "MATCHED ATTACKER (primary)",
+            {
+                "vanilla": _col("vanilla_vs_matched_attacker_avg_reward", "vanilla_vs_attacker_reward"),
+                "pessimistic": _col("pessimistic_vs_matched_attacker_avg_reward", "pessimistic_vs_attacker_reward"),
+                "offpolicy": _col("offpolicy_vs_matched_attacker_avg_reward", "offpolicy_greedy_vs_attacker_reward"),
+            },
+        ),
+        (
+            "SHARED RANDOM-δ",
+            {
+                "vanilla": "vanilla_vs_shared_random_avg_reward",
+                "pessimistic": "pessimistic_vs_shared_random_avg_reward",
+                "offpolicy": "offpolicy_vs_shared_random_avg_reward",
+            },
+        ),
+        (
+            "PGD WORST-CASE",
+            {
+                "vanilla": "vanilla_pgd_reward",
+                "pessimistic": "pessimistic_pgd_reward",
+                "offpolicy": "offpolicy_pgd_reward",
+            },
+        ),
+        (
+            "TRANSFER (van greedy vs att_p — supplementary)",
+            {
+                "vanilla": _col("vanilla_vs_transfer_attacker_avg_reward", "vanilla_vs_attacker_reward"),
+                "pessimistic": None,
+                "offpolicy": None,
+            },
+        ),
+    ]
+
+    clean = {
+        "vanilla": _mean("vanilla_test_avg_reward"),
+        "pessimistic": _mean("pessimistic_test_avg_reward"),
+        "offpolicy": _mean("offpolicy_greedy_test_avg_reward"),
+    }
+
+    print(f"\nClean means: vanilla={clean['vanilla']:.1f}  pes={clean['pessimistic']:.1f}  off={clean['offpolicy']:.1f}")
+    print(f"GridWorld attack ref: pes={gw['pessimistic_attack']:.1f}  off={gw['offpolicy_attack']:.1f}  van={gw['vanilla_attack']:.1f}")
+
+    for title, cols in eval_suites:
+        print(f"\n--- {title} ---")
+        if cols["vanilla"] is None or cols["vanilla"] not in ok.columns:
+            print("  (columns not available — re-run with updated pipeline)")
+            continue
+        v = _mean(cols["vanilla"])
+        print(f"  Vanilla:     {v:.1f}")
+        if cols["pessimistic"] and cols["pessimistic"] in ok.columns:
+            p = _mean(cols["pessimistic"])
+            o = _mean(cols["offpolicy"]) if cols["offpolicy"] in ok.columns else float("nan")
+            print(f"  Pessimistic: {p:.1f}")
+            print(f"  Off-policy:  {o:.1f}")
+            n1 = p > o > v
+            print(f"  pes > off > van: {'YES' if n1 else 'NO'}  ({p:.1f} > {o:.1f} > {v:.1f})")
+        else:
+            print(f"  (vanilla-only transfer column)")
+
+    n2 = clean["pessimistic"] >= 400 and clean["offpolicy"] >= 400
+    speed_col = "speedup_offpolicy_vs_pessimistic"
+    n3 = _mean(speed_col) > 1.0 if speed_col in ok.columns else False
+
+    matched_p = _mean(_col("pessimistic_vs_matched_attacker_avg_reward", "pessimistic_vs_attacker_reward"))
+    matched_o = _mean(_col("offpolicy_vs_matched_attacker_avg_reward", "offpolicy_greedy_vs_attacker_reward"))
+    matched_v = _mean(_col("vanilla_vs_matched_attacker_avg_reward", "vanilla_vs_attacker_reward"))
+    n1_primary = matched_p > matched_o > matched_v
+
+    print("\n" + "-" * 70)
+    print("Pre-registered narrative checks (CartPole, matched attacker primary):")
+    print(f"  1. Attack robustness pes > off > van   {'YES' if n1_primary else 'NO'}  "
+          f"({matched_p:.1f} > {matched_o:.1f} > {matched_v:.1f})")
+    print(f"  2. Clean performance preserved (≥400)  {'YES' if n2 else 'NO'}")
+    print(f"  3. Off-policy faster than pessimistic    {'YES' if n3 else 'NO'}  "
+          f"(mean speedup={_mean(speed_col):.1f}x)" if speed_col in ok.columns else "")
+    gw_n1 = gw["pessimistic_attack"] > gw["offpolicy_attack"] > gw["vanilla_attack"]
+    print(f"\nGridWorld (500 seeds) pes > off > van:   {'YES' if gw_n1 else 'NO'}")
+    print(f"CartPole supports same narrative?         {'YES' if n1_primary and n2 else 'PARTIAL' if n1_primary else 'NO'}")
+    print("=" * 70)
 
 
 def analyze_cartpole_csv(csv_filename: str = "cartpole_experiments.csv") -> None:
@@ -1497,34 +2189,68 @@ def analyze_cartpole_csv(csv_filename: str = "cartpole_experiments.csv") -> None
     print(f"ANALYSIS OF {len(df)} EXPERIMENTS ({n_ok} succeeded, {n_err} failed)")
     print("=" * 70)
 
-    def _report(label: str, clean_col: str, att_col: str, pgd_col: Optional[str] = None) -> None:
-        print(f"\n--- {label} ---")
-        if clean_col in df.columns:
+    def _report_block(title: str, clean_col: str, matched_col: str, shared_col: str, pgd_col: str, ratio_col: str) -> None:
+        print(f"\n--- {title} ---")
+        if clean_col in ok.columns:
             s = ok[clean_col].dropna()
             if len(s):
-                print(f"Mean test reward: {s.mean():.2f} ± {s.std():.2f}")
-        if att_col in df.columns:
-            s = ok[att_col].dropna()
+                print(f"  Clean:           {s.mean():.2f} ± {s.std():.2f}")
+        if matched_col in ok.columns:
+            s = ok[matched_col].dropna()
             if len(s):
-                print(f"Mean vs attacker: {s.mean():.2f} ± {s.std():.2f}")
-        if pgd_col and pgd_col in df.columns:
+                print(f"  Matched attacker:{s.mean():.2f} ± {s.std():.2f}", end="")
+                rcol = matched_col.replace("_avg_reward", "_attack_clean_ratio")
+                if rcol in ok.columns:
+                    r = ok[rcol].dropna()
+                    if len(r):
+                        print(f"  (attack/clean={r.mean():.3f})", end="")
+                print()
+        if shared_col in ok.columns:
+            s = ok[shared_col].dropna()
+            if len(s):
+                print(f"  Shared random-δ: {s.mean():.2f} ± {s.std():.2f}")
+        if pgd_col in ok.columns:
             s = ok[pgd_col].dropna()
             if len(s):
-                print(f"Mean PGD worst-case: {s.mean():.2f} ± {s.std():.2f}")
+                print(f"  PGD worst-case:  {s.mean():.2f} ± {s.std():.2f}")
 
-    _report("Vanilla Q-Learning (Baseline)", "vanilla_test_avg_reward", "vanilla_vs_attacker_reward", "vanilla_pgd_reward")
-    _report("Pessimistic Q-Learning", "pessimistic_test_avg_reward", "pessimistic_vs_attacker_reward", "pessimistic_pgd_reward")
-    if "pessimistic_test_maximin_avg_reward" in df.columns:
+    _report_block(
+        "Vanilla DQN",
+        "vanilla_test_avg_reward",
+        "vanilla_vs_matched_attacker_avg_reward",
+        "vanilla_vs_shared_random_avg_reward",
+        "vanilla_pgd_reward",
+        "vanilla_vs_matched_attacker_attack_clean_ratio",
+    )
+    _report_block(
+        "Pessimistic DQN",
+        "pessimistic_test_avg_reward",
+        "pessimistic_vs_matched_attacker_avg_reward",
+        "pessimistic_vs_shared_random_avg_reward",
+        "pessimistic_pgd_reward",
+        "pessimistic_vs_matched_attacker_attack_clean_ratio",
+    )
+    if "pessimistic_test_maximin_avg_reward" in ok.columns:
         s = ok["pessimistic_test_maximin_avg_reward"].dropna()
         if len(s):
-            print(f"Mean test reward (maximin): {s.mean():.2f} ± {s.std():.2f}")
-    if "pessimistic_best_greedy_eval" in df.columns:
-        s = ok["pessimistic_best_greedy_eval"].dropna()
+            print(f"  Pessimistic maximin clean: {s.mean():.2f} ± {s.std():.2f}")
+    _report_block(
+        "Off-Policy Greedy",
+        "offpolicy_greedy_test_avg_reward",
+        "offpolicy_vs_matched_attacker_avg_reward",
+        "offpolicy_vs_shared_random_avg_reward",
+        "offpolicy_pgd_reward",
+        "offpolicy_vs_matched_attacker_attack_clean_ratio",
+    )
+
+    if "vanilla_vs_transfer_attacker_avg_reward" in ok.columns:
+        s = ok["vanilla_vs_transfer_attacker_avg_reward"].dropna()
         if len(s):
-            print(f"Mean best greedy during finetune: {s.mean():.2f} ± {s.std():.2f}")
-    if "pessimistic_early_stopped" in df.columns:
-        print(f"Early stopped: {ok['pessimistic_early_stopped'].sum():.0f}/{len(ok)} runs")
-    _report("Off-Policy Greedy Target", "offpolicy_greedy_test_avg_reward", "offpolicy_greedy_vs_attacker_reward", "offpolicy_pgd_reward")
+            print(f"\n--- Transfer (vanilla vs att_p, supplementary) ---")
+            print(f"  Mean reward: {s.mean():.2f} ± {s.std():.2f}")
+
+    if "pessimistic_early_stopped" in ok.columns:
+        print(f"\nPessimistic early stopped: {ok['pessimistic_early_stopped'].sum():.0f}/{len(ok)} runs")
 
     for col in (
         "performance_diff_offpolicy_vs_pessimistic",
@@ -1537,6 +2263,7 @@ def analyze_cartpole_csv(csv_filename: str = "cartpole_experiments.csv") -> None
                 print(f"\n{col}: {s.mean():.3f} ± {s.std():.3f}")
 
     print("=" * 70)
+    compare_narratives(csv_filename)
 
 
 if __name__ == "__main__":
@@ -1547,9 +2274,10 @@ if __name__ == "__main__":
         "--step",
         type=int,
         default=1,
-        choices=[1, 2, 3, 4, 5, 6, 7, 8],
+        choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         help="1=vanilla, 2=attack eval, 3=pessimistic, 4=off-policy, 5=attackers, "
-        "6=single comparison, 7=multi-seed loop, 8=analyze CSV",
+        "6=single comparison, 7=fair multi-seed loop, 8=analyze CSV, 9=narrative compare, "
+        "10=eval-only from checkpoints (fair metrics)",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--base-seed", type=int, default=0, help="First seed for step 7 (seed_i = base_seed + i)")
@@ -1562,6 +2290,20 @@ if __name__ == "__main__":
     parser.add_argument("--eval-episodes", type=int, default=100, help="Evaluation episodes per condition")
     parser.add_argument("--csv", type=str, default="cartpole_experiments.csv", help="CSV output for step 7/8")
     parser.add_argument("--resume", action="store_true", help="Resume step 7 from checkpoint")
+    parser.add_argument(
+        "--belief",
+        type=str,
+        default="learned",
+        choices=["learned", "uniform"],
+        help="Belief model for pessimistic/off-policy (step 7)",
+    )
+    parser.add_argument("--belief-pretrain", type=int, default=30_000, help="Belief RNN pretrain steps")
+    parser.add_argument("--vanilla-min-reward", type=float, default=475.0, help="Vanilla solve gate")
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Step 7/10: skip training, re-run fair eval from checkpoints/seed_*/",
+    )
     args = parser.parse_args()
 
     if args.step == 1:
@@ -1592,6 +2334,23 @@ if __name__ == "__main__":
             eval_episodes=args.eval_episodes,
             csv_filename=args.csv,
             resume=args.resume,
+            belief_mode=args.belief,
+            belief_pretrain_steps=args.belief_pretrain,
+            vanilla_min_reward=args.vanilla_min_reward,
+            eval_only=args.eval_only,
+        )
+    elif args.step == 10:
+        run_experiment_loop(
+            num_experiments=args.num_experiments,
+            base_seed=args.base_seed,
+            eval_episodes=args.eval_episodes,
+            attack_steps=args.attack_steps,
+            csv_filename=args.csv,
+            resume=args.resume,
+            belief_mode=args.belief,
+            eval_only=True,
         )
     elif args.step == 8:
         analyze_cartpole_csv(args.csv)
+    elif args.step == 9:
+        compare_narratives(args.csv)

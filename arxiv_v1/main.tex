@@ -1,0 +1,530 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[letterpaper,top=0.85in,bottom=0.9in,left=0.7in,right=0.7in]{geometry}
+\usepackage{times}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\SetKwInput{KwIn}{Input}
+\SetKwInput{KwOut}{Output}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\setlist[itemize]{leftmargin=1.1em,itemsep=2pt,topsep=3pt}
+\setlist[enumerate]{leftmargin=1.3em,itemsep=2pt,topsep=3pt}
+
+\title{\vspace{-1.2em}Pessimistic-Behavior / Greedy-Target Q-Learning\\against Adversarial State Perturbations\vspace{-0.4em}}
+\author{
+Adithya Venkatesh$^{1}$ \quad Zizhan Zheng$^{2}$\\[4pt]
+{\small $^{1}$Independent researcher \quad $^{2}$Department of Computer Science, Tulane University}\\
+{\small \texttt{zzheng3@tulane.edu}}
+\vspace{-0.6em}
+}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+A well-trained RL agent can be defeated by strategically perturbing its state observations at test time.
+Sun \& Zheng (ICLR 2024) address this threat with \emph{belief-enriched pessimistic Q-learning}: the agent chooses a maximin action over a belief about possible true states, both when collecting data and when forming Bellman targets.
+The resulting defense is strong in discrete domains but incurs substantial test-time cost, because every decision requires a maximin search over the belief.
+We study a deliberately cheaper variant, \textbf{Pessimistic-Behavior / Greedy-Target} (PB-GT) Q-learning: training still uses pessimistic (maximin) \emph{behavior} under perturbed observations, but the \emph{target} is ordinary greedy Q-learning on the true next state, and test-time actions are greedy on the observed state---no belief, no maximin.
+On a tabular $5{\times}5$ GridWorld with $500$ random seeds, full pessimistic Q-learning remains far more robust under trained DQN attackers ($-21.8{\pm}50.0$ vs.\ $-552.4{\pm}335.2$ for PB-GT and $-682.1{\pm}329.0$ for vanilla), while PB-GT matches vanilla inference speed and is ${\approx}11.6{\times}$ faster than maximin.
+A Double-DQN port to CartPole-v1 ($5$ seeds) is reported as a preliminary deep-RL check: vanilla converges reliably after checkpoint restore, but our BP-style pessimistic and PB-GT agents do \emph{not} reproduce the GridWorld robustness ordering.
+We therefore present PB-GT as a fast approximation with a documented robustness gap, not as a substitute for BP-DQN.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Reinforcement learning (RL) agents that act on learned value or policy networks are brittle under \emph{adversarial state perturbations}: a test-time attacker, subject to a budget $\varepsilon$, replaces the true state $s$ by a nearby observation $\tilde s\in B_\varepsilon(s)$ so as to minimize the agent's return~\citep{huang2017adversarial,zhang2020robust}.
+The attacker does not change the underlying transition dynamics; it only poisons what the agent sees.
+This threat model is now standard, and several defenses exist.
+Regularization methods such as SA-MDP / SA-DQN~\citep{zhang2020robust} and WocaR-RL~\citep{liang2022wocar} encourage smoothness of $\pi(\cdot\mid s)$ across $B_\varepsilon(s)$.
+Alternating-training methods such as ATLA~\citep{zhang2021robust} treat the attacker as an RL agent and co-train it with the defender, which can be more robust but is computationally expensive.
+
+\citet{sun2024belief} take a different route.
+They view robust RL under state attacks as a Stackelberg Markov game with asymmetric observations and propose \emph{pessimistic Q-learning}: given $\tilde s$, the agent selects
+\begin{equation}
+\pi(\tilde s)=\arg\max_{a\in\mathcal{A}}\min_{\bar s\in B_\varepsilon(\tilde s)} Q(\bar s,a).
+\label{eq:maximin}
+\end{equation}
+The same maximin principle is used in the Bellman target, so training and testing are consistent.
+They further shrink uncertainty with a belief $M_t\subseteq B_\varepsilon(\tilde s_t)$ updated from history (tabular case) or a particle-filter RNN (deep case: BP-DQN), and with diffusion purification for pixel observations (DP-DQN).
+Empirically, BP-DQN and DP-DQN obtain strong robustness on continuous GridWorld and Atari.
+
+Maximin-over-belief inference is the source of that robustness---and of its cost.
+In our tabular GridWorld implementation, belief-restricted maximin is about $11{\times}$ slower per step than greedy $Q$-argmax; in a CartPole Double-DQN port the gap is about $50{\times}$.
+Many settings need \emph{low-latency} decisions under moderate observation noise, not a full worst-case search at every tick.
+This paper asks a narrow question that is complementary to~\citet{sun2024belief}:
+
+\begin{quote}
+\emph{If we keep pessimistic \textbf{behavior} while collecting data, but revert to vanilla greedy \textbf{targets} and greedy \textbf{test} actions, how much robustness do we retain, and how much inference cost do we save?}
+\end{quote}
+
+We call the resulting algorithm \textbf{PB-GT} (Pessimistic-Behavior / Greedy-Target) Q-learning.
+It is \emph{not} ``off-policy DQN'': vanilla and pessimistic Q-learning are already off-policy in the classical sense.
+The distinctive design is the \emph{pairing} of maximin behavior with a non-pessimistic backup and a non-pessimistic test policy---a deliberate train/test mismatch, opposite to the consistency argument of~\citet{sun2024belief}.
+We evaluate it honestly, with the same three-way comparison throughout: vanilla Q / DQN, belief-enriched pessimistic Q / BP-style DQN, and PB-GT.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Tabular reproduction and scale.} We implement vanilla Q-learning and belief-enriched pessimistic Q-learning~\citep[Alg.~1--2]{sun2024belief} on a $5{\times}5$ GridWorld and run a $500$-seed comparison under fixed trained DQN attackers.
+\item \textbf{PB-GT.} We define and evaluate a cheaper variant that uses pessimistic behavior at train time but greedy Double-Q targets and greedy test actions.
+On GridWorld, PB-GT sits between vanilla and full pessimism under attack and matches vanilla inference speed.
+\item \textbf{Preliminary deep port.} We port all three methods to CartPole-v1 with Double DQN and a simplified GRU particle belief (BP-DQN-\emph{style}, not full PF-RNN BP-DQN). Results are mixed; we do not claim GridWorld-style robustness in this setting.
+\item \textbf{Scoped claim.} v1 documents a robustness--compute tradeoff. Closing the gap to BP-DQN while keeping PB-GT's speed, and comparing on continuous GridWorld / CAR-DQN / Atari, is left to future work.
+\end{enumerate}
+
+\section{Background}
+\label{sec:bg}
+
+\subsection{MDPs and Q-learning}
+An MDP is $\langle \mathcal{S},\mathcal{A},P,R,\gamma\rangle$.
+A (deterministic) policy $\pi:\mathcal{S}\to\mathcal{A}$ induces $Q^\pi(s,a)=R(s,a)+\gamma\sum_{s'}P(s'|s,a)\max_{a'}Q^\pi(s',a')$ at optimality.
+Vanilla Q-learning~\citep{watkins1992q} updates
+\begin{equation}
+Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\bigl(R+\gamma\max_{a'}Q(s',a')\bigr)
+\label{eq:vanilla-q}
+\end{equation}
+from true-state transitions, with $\varepsilon$-greedy behavior on $s$.
+Deep Q-networks~\citep{mnih2015human} replace the table by $Q_\theta$, typically with Double DQN targets~\citep{van2016deep} and a replay buffer.
+At test time vanilla DQN acts greedily on whatever observation it receives.
+
+\subsection{State-adversarial attacks}
+Following~\citet{huang2017adversarial,zhang2020robust,sun2024belief}, a test-time attacker observes $s_t$ and produces $\tilde s_t\in B_\varepsilon(s_t)$ (an $\ell_p$ ball; in our tabular grid, the discrete $1$-step neighborhood).
+The agent acts on $\tilde s_t$; the environment transitions from the \emph{true} $s_t$.
+For a fixed defender $\pi$, the attacker problem is itself an MDP~\citep{zhang2021robust,sun2024belief} with reward $-R$, so a DQN can be trained to attack a frozen defender.
+We adopt the usual training assumption: the agent has access to an intact MDP and to $\varepsilon$ (or an estimate) while learning~\citep{zhang2020robust,sun2024belief}.
+
+\subsection{Pessimistic Q-learning \citep{sun2024belief}}
+Given $\tilde s$, Algorithm~1 of~\citet{sun2024belief} sets the target/behavior policy to the maximin rule~\eqref{eq:maximin} and sets the attacker's best response to
+\begin{equation}
+\omega_\pi(s)=\arg\min_{\tilde s\in B_\varepsilon(s)} Q\bigl(s,\pi(\tilde s)\bigr).
+\label{eq:omega}
+\end{equation}
+The Q update uses a pessimistic bootstrap $Q(s',\pi(\omega_\pi(s')))$.
+Algorithm~2 maintains a belief $M_t$: $M_0=B_\varepsilon(\tilde s_0)$ (in our tabular code, $M_0=\mathcal{S}$), then
+\begin{equation}
+M_{t+1}=\{s':\exists s\in M_t,\,P(s'|s,a_t)>0\}\;\cap\; B_\varepsilon(\tilde s_{t+1}).
+\label{eq:belief}
+\end{equation}
+Maximin is then taken over $M_t\cap B_\varepsilon(\tilde s_t)$ rather than the full ball.
+BP-DQN (Alg.~4--5) lifts this idea to deep Q-learning with PF-RNN particles~\citep{ma2020pfrnn}; DP-DQN (Alg.~6--7) uses diffusion purification on pixels.
+Our deep pessimistic agent is \textbf{BP-style}: maximin over a finite particle belief and a maximin TD target, but with a simplified GRU belief, not the full PF-RNN of~\citet{sun2024belief}.
+We do not implement DP-DQN.
+
+\section{Methods}
+\label{sec:methods}
+
+All three methods share the same environments, attacker protocol, and (in the deep case) the same vanilla backbone.
+Table~\ref{tab:methods} summarizes the only differences that matter: train-time behavior, Bellman target, and test policy.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The three algorithms compared in this paper. PB-GT is the only method whose test policy is cheaper than its train-time behavior.}
+\label{tab:methods}
+\begin{tabular}{@{}llll@{}}
+\toprule
+ & Vanilla & Pessimistic & \textbf{PB-GT} \\
+\midrule
+Train beh. & $\varepsilon$-greedy on $s$ & $\varepsilon$-greedy maximin on $\tilde s$ & same as pes. \\
+TD target & greedy on $s'$ & $\max\min$ over $M'$ & greedy on $s'$ \\
+Test (atk.) & greedy on $\tilde s$ & maximin over $M$ & greedy on $\tilde s$ \\
+Belief & none & yes & train only \\
+Paper & DQN & BP-style & \emph{this work} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Vanilla Q / Double DQN}
+Tabular: $\varepsilon$-greedy on the true state, update~\eqref{eq:vanilla-q}, test $a=\arg\max_a Q(\tilde s,a)$ (or $Q(s,a)$ if clean).
+Deep: Double DQN with Huber loss, MLP $Q_\theta$, greedy test on the (normalized) observation.
+
+\subsection{Belief-enriched pessimistic Q (tabular)}
+We follow Algorithms~1--2 of~\citet{sun2024belief} with two implementation notes that we state explicitly.
+(i)~The discrete ball $B_\varepsilon(s)$ is the cell $s$ plus its on-grid $1$-step neighbors (up to $5$ states).
+(ii)~When $|M\cap B_\varepsilon(\tilde s)|>1$, our tabular \emph{policy} uses the \emph{mean} Q over the belief rather than the hard $\min$ (a softer tabular approximation); the TD target still uses the maximin construction of~\citet{sun2024belief}.
+Training: clone a vanilla Q-table, then $500$ fine-tune episodes with $\omega_\pi$ (or a learned DQN attacker at test).
+Test under attack: update $M_t$ and act with the belief-restricted policy.
+Clean test: greedy on the true state, for parity with vanilla/PB-GT clean columns.
+
+\subsection{PB-GT Q-learning}
+\label{sec:pbgt}
+PB-GT keeps the \emph{data collection} of pessimistic Q-learning and changes only the backup and the test rule.
+
+\paragraph{Training (tabular).}
+At each step, form $\tilde s=\omega_\pi(s)$ (heuristic~\eqref{eq:omega} during learning), take an $\varepsilon$-greedy maximin action w.r.t.\ the current belief, update $M_t$ as in~\eqref{eq:belief}, but update Q with the \emph{vanilla} target:
+\begin{equation}
+Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\bigl(R+\gamma\max_{a'}Q(s',a')\bigr).
+\label{eq:pbgt-tab}
+\end{equation}
+Belief is used to choose $a$, not to form the backup.
+
+\paragraph{Testing.}
+Ignore belief and maximin:
+\begin{equation}
+a=\arg\max_{a} Q(\tilde s,a).
+\label{eq:pbgt-test}
+\end{equation}
+Inference cost therefore matches vanilla.
+
+\paragraph{Why this might help.}
+Pessimistic rollouts expose the Q-function to adversarial observations and to maximin actions, so the learned $Q$ can be more robust than vanilla even if the \emph{test} policy is greedy.
+The cost of maximin is paid only during training.
+The risk---confirmed on GridWorld---is that a greedy test policy can still be exploited by a strong attacker, so PB-GT should not be expected to match full pessimism.
+
+\paragraph{Deep PB-GT DQN.}
+Fine-tune from a pretrained vanilla DQN (optionally freeze the MLP backbone; train the last linear layer).
+Collection matches BP-style training: random-search PGD in $B_\varepsilon(s)$ to form $\tilde s$, $\varepsilon$-greedy maximin over GRU particles $M_t$, store $(s,a,r,s',M')$ .
+The loss uses Double-DQN greedy targets on the \emph{true} $s'$, \emph{not}
+$y=r+\gamma\max_{a'}\min_{m\in M'}Q_{\theta'}(m,a')$.
+Test is Algorithm~B: greedy on $\tilde s$.
+Pseudocode is given in Appendix~\ref{app:alg}.
+
+\begin{algorithm}[t]
+\caption{PB-GT Q-learning (tabular)}
+\label{alg:pbgt-tab}
+\KwIn{pretrained $Q$; budget $\varepsilon$; episodes $E$}
+\KwOut{fine-tuned $Q$}
+$Q\leftarrow$ copy of pretrained table\;
+\For{$e=1$ \KwTo $E$}{
+  reset $s$; $M\leftarrow\mathcal{S}$\;
+  \While{$s$ not terminal}{
+    update $\pi$ from $Q$ with belief $M$\;
+    $\tilde s\leftarrow\omega_\pi(s)$\;
+    $a\leftarrow\varepsilon$-greedy maximin w.r.t.\ $M\cap B_\varepsilon(\tilde s)$\;
+    execute $a$, observe $R,s'$\;
+    $Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha(R+\gamma\max_{a'}Q(s',a'))$\;
+    update $M$ by~\eqref{eq:belief}\;
+    $s\leftarrow s'$\;
+  }
+}
+\end{algorithm}
+
+\section{Experimental setup}
+\label{sec:setup}
+
+\subsection{Tabular GridWorld}
+A custom $5{\times}5$ grid~\citep[related to the discrete setting discussed by][]{sun2024belief}.
+Default cell reward $-1$; gold at $(0,3)$ with $+10$ (terminal); bomb at $(4,3)$ with $-10$ (terminal); four deterministic move actions with stay-on-wall.
+$\gamma=1$, $\alpha$ linearly annealed, vanilla pretrain $2000$ episodes, robust fine-tune $500$ episodes from the \emph{same} Q initialization, evaluation $100$ episodes, episode cap $1000$ steps.
+The discrete $\varepsilon$-ball is the $1$-step neighborhood.
+We report mean episodic return $\pm$ standard deviation across \textbf{$500$ independent seeds}.
+
+\paragraph{Attackers.}
+We train Stable-Baselines3 DQN attackers once (frozen) against pessimistic and PB-GT defenders; attacker action is a perturbation direction in $\{\mathrm{UP},\mathrm{DOWN},\mathrm{LEFT},\mathrm{RIGHT},\mathrm{STAY}\}$.
+At evaluation, vanilla is tested against the pessimistic attacker; pessimistic and PB-GT are tested against their own attackers (matched threat).
+This is the protocol behind Table~\ref{tab:gw} and is \emph{not} identical to MinBest / PA-AD / iterative PGD in~\citet{sun2024belief}.
+
+\subsection{CartPole-v1 (preliminary)}
+Gymnasium CartPole-v1, observations linearly scaled to $[-1,1]$, attack budget $\varepsilon=0.05$ in raw coordinates ($L_\infty$).
+Vanilla: Double DQN, MLP $[128,128]$, $5{\times}10^5$ steps, mid-eval + best-checkpoint restore (solve gate $\geq 475$).
+Belief: GRU (hidden $64$) emitting $\kappa{=}20$ particles, pretrained $30$k steps on clean rollouts with synthetic noise---a simplified analogue of PF-RNN, \emph{not} $\kappa_p{=}30$ PF-LSTM BP-DQN.
+Pessimistic fine-tune: clone vanilla, freeze backbone, LR $5{\cdot}10^{-5}$, up to $10^5$ steps, maximin TD target, early-stop / restore-best.
+PB-GT fine-tune: same collection, greedy targets, $4{\times}10^4$ steps, LR $10^{-5}$.
+\textbf{$n{=}5$ seeds} ($0$--$4$).
+Hardware: Apple M1 Pro, CPU, PyTorch $2.8$, Gymnasium $1.1.1$.
+\citet{sun2024belief} used an RTX $3090$; we flag this gap.
+
+\paragraph{CartPole metrics} (mean return over $100$ eval episodes per seed).
+(1)~Clean: greedy on true $s$ (pessimistic also logs maximin-on-clean separately).
+(2)~Matched attacker: SB3 DQN, $81{=}3^4$ discrete $\delta$ per dimension, $80$k steps per (seed, defender); vanilla/PB-GT defend greedily, pessimistic with maximin-over-belief.
+(3)~Shared random $\delta\sim\mathrm{Unif}([-\varepsilon,\varepsilon]^4)$ from a shared RNG stream.
+(4)~PGD*: $32$-candidate random search in $B_\varepsilon(s)$ scoring $Q(s,\pi(\tilde s))$---defender-specific, \emph{not} the $10$-step PGD ($\eta{=}10$) of~\citet{sun2024belief}.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{GridWorld: robustness--speed tradeoff}
+\label{sec:gw}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Tabular $5{\times}5$ GridWorld, $500$ seeds. Clean and attack returns are mean episodic return $\pm$ std across seeds. Inference is mean ms/step under attack.}
+\label{tab:gw}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Clean & Under attack & Atk.\ infer.\ (ms) \\
+\midrule
+Vanilla & $7.35{\pm}0.24$ & $-682.1{\pm}329.0$ & $0.008$ \\
+Pessimistic & $7.35{\pm}0.27$ & $\mathbf{-21.8{\pm}50.0}$ & $0.093$ \\
+PB-GT & $7.37{\pm}0.23$ & $-552.4{\pm}335.2$ & $0.008$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig1_gridworld_bars.png}
+\caption{GridWorld mean return $\pm$ std ($n{=}500$). Clean performance is indistinguishable; under a trained DQN attacker the ordering is pessimistic $\gg$ PB-GT $>$ vanilla.}
+\label{fig:gw-bars}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig2_gridworld_box.png}
+\caption{Distribution of attack returns across $500$ seeds (outliers hidden). Pessimistic mass is near zero; vanilla and PB-GT have heavy negative tails.}
+\label{fig:gw-box}
+\end{figure}
+
+Table~\ref{tab:gw} and Figures~\ref{fig:gw-bars}--\ref{fig:gw-box} are the main empirical result of this v1.
+Clean returns are essentially identical (${\approx}7.35$): all three methods solve the short grid task when observations are intact.
+Under attack, \textbf{pessimistic Q-learning dominates}: $-21.8{\pm}50.0$ versus $-552.4{\pm}335.2$ (PB-GT) and $-682.1{\pm}329.0$ (vanilla).
+Pessimistic beats PB-GT in $96.4\%$ of seeds and vanilla in $96.0\%$; PB-GT beats vanilla in $60.6\%$ of seeds.
+PB-GT is therefore a \emph{modest} improvement over vanilla on average, not a near-match to belief-maximin defense.
+
+The compute side of the tradeoff is unambiguous.
+Attack-time inference is $0.093$\,ms/step for pessimistic vs.\ $0.008$\,ms/step for PB-GT and vanilla---a \textbf{$11.6{\times}$} slowdown for full maximin (Figure~\ref{fig:speed}).
+This matches the motivation in~\citet{sun2024belief} that robustness from belief search is not free, and it is the reason PB-GT exists.
+
+\paragraph{Interpretation.}
+These numbers support two claims and refute a third.
+(1)~Belief-enriched maximin, even in this small discrete grid with a mean-over-belief policy approximation, is highly effective against a learned DQN attacker---consistent with the tabular motivation of~\citet{sun2024belief}.
+(2)~Pessimistic \emph{behavior} alone (PB-GT) is not enough to capture most of that robustness if the test policy is greedy on $\tilde s$.
+(3)~We do \emph{not} claim that PB-GT ``approaches BP-DQN robustness.''
+The gap of ${\approx}530$ return between pessimistic and PB-GT is the open problem for later versions of this line of work (hybrid inference, distillation, mixed targets; see \S\ref{sec:limit}).
+
+\subsection{Inference cost}
+\label{sec:speed}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig3_inference.png}
+\caption{Attack-time ms/step (log scale). PB-GT matches greedy cost; pessimistic maximin is ${\approx}11.6{\times}$ slower on GridWorld and ${\approx}51{\times}$ slower on CartPole.}
+\label{fig:speed}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Attack-time inference. CartPole uses matched-attacker eval.}
+\label{tab:speed}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Environment & Pes.\ (ms) & PB-GT (ms) & Slowdown \\
+\midrule
+GridWorld & $0.093$ & $0.008$ & $11.6{\times}$ \\
+CartPole & $1.88$ & $0.037$ & $51{\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:speed} and Figure~\ref{fig:speed} show that the speed advantage of PB-GT survives the deep port: maximin over $\kappa{=}20$ particles is ${\approx}51{\times}$ slower than greedy MLP inference on CartPole.
+If a deep PB-GT variant can be made robust, the overhead argument is already favorable.
+
+\subsection{CartPole-v1: preliminary, not confirmatory}
+\label{sec:cp}
+
+\begin{table}[t]
+\centering
+\small
+\caption{CartPole-v1 Double DQN, $5$ seeds, vanilla best-checkpoint restore. Mean $\pm$ std of per-seed mean returns ($100$ eval episodes). PGD* is defender-specific $32$-candidate search.}
+\label{tab:cp}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Metric & Vanilla & Pes.\ (BP-style) & PB-GT \\
+\midrule
+Clean & $\mathbf{499{\pm}2}$ & $334{\pm}226$ & $403{\pm}214$ \\
+Matched atk. & $113{\pm}216$ & $11{\pm}3$ & $109{\pm}219$ \\
+Shared rand.\ $\delta$ & $284{\pm}176$ & $125{\pm}185$ & $150{\pm}209$ \\
+PGD* & $319{\pm}154$ & $131{\pm}126$ & $189{\pm}148$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig4_cartpole.png}
+\caption{CartPole metrics ($n{=}5$). No method dominates all columns; pessimistic is weak under matched attack. Treat as preliminary.}
+\label{fig:cp}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig5_cartpole_seeds.png}
+\caption{Per-seed CartPole clean return after vanilla restore-best. Vanilla solves all $5$ seeds; pessimistic and PB-GT collapse on some seeds.}
+\label{fig:cp-seeds}
+\end{figure}
+
+After adding mid-training evaluation and best-checkpoint restore for vanilla (the same idea we used to stabilize pessimistic fine-tuning), vanilla clean return is $499.1{\pm}1.9$ with \textbf{$5/5$ seeds solved} (Figure~\ref{fig:cp-seeds}).
+That fixes an earlier seed-$2$ collapse (clean $107$) in a previous snapshot.
+However, BP-style pessimistic and PB-GT are \emph{not} stable on clean ($334{\pm}226$ and $403{\pm}214$), and under matched attackers pessimistic returns ${\approx}11$ on every seed (Table~\ref{tab:cp}, Figure~\ref{fig:cp}).
+Shared-random and PGD* also fail to reproduce the GridWorld ordering.
+
+We \textbf{do not} claim a deep-RL robustness result on CartPole.
+Likely causes, all of which distinguish this port from Table~1a of~\citet{sun2024belief}: (i)~fine-tune hyperparameters were selected before vanilla restore and need retuning; (ii)~GRU particles with $\kappa{=}20$ are not PF-RNN BP-DQN; (iii)~matched SB3 attackers are retrained per defender and are a different threat than MinBest / PA-AD / iterative PGD; (iv)~$n{=}5$ is too small; (v)~CartPole is not continuous GridWorld.
+We keep CartPole as evidence that the \emph{pipeline} runs end-to-end and that the inference gap persists, and we move the main deep comparison to future continuous-GridWorld work.
+
+\section{Related work}
+\label{sec:related}
+
+\textbf{State-observation attacks} on RL were demonstrated by~\citet{huang2017adversarial} and developed into SA-MDP~\citep{zhang2020robust}, ATLA~\citep{zhang2021robust}, and WocaR~\citep{liang2022wocar}; see~\citet{ilahi2022challenges} for a broader survey.
+\textbf{Pessimism and beliefs.}
+\citet{sun2024belief} is the direct predecessor of this paper: Stackelberg formulation, maximin Q, tabular belief, BP-DQN, DP-DQN.
+We reuse their tabular algorithms and study a cheaper test-time rule.
+\textbf{Other robust DQN.}
+CAR-DQN~\citep{li2024car} minimizes a surrogate of Bellman $\infty$-error under a consistency assumption; we list it as a future baseline, not a result we have.
+PF-RNN~\citep{ma2020pfrnn} is the belief module in BP-DQN; our CartPole GRU is a simplified stand-in.
+We do not claim novelty over SA-DQN / WocaR / ATLA / CAR-DQN on Atari---those comparisons require the continuous GridWorld / Atari bake-off outlined in \S\ref{sec:limit}.
+
+\section{Limitations and future work}
+\label{sec:limit}
+
+\paragraph{What this v1 does \emph{not} show.}
+PB-GT does not approach pessimistic / BP-DQN robustness on GridWorld.
+CartPole is preliminary and currently negative for both robust methods.
+We have not reproduced Table~1a of~\citet{sun2024belief} (continuous GridWorld, BP-DQN, PGD / MinBest / PA-AD).
+We have not run CAR-DQN~\citep{li2024car}, SA-DQN, WocaR, or Atari Pong/Freeway.
+PGD* on CartPole is a $32$-sample random search, not iterative PGD.
+Vanilla GridWorld is evaluated against the pessimistic attacker, not a vanilla-matched attacker.
+
+\paragraph{Natural next experiments} (in the spirit of~\citet{sun2024belief}, \S4).
+(1)~\textbf{Continuous GridWorld + official BP-DQN}, then add PB-GT under the same eval protocol.
+(2)~\textbf{CAR-DQN} as an additional robust DQN baseline.
+(3)~\textbf{PB-GT refinements} aimed at Zheng's criterion---approach BP-DQN robustness at much lower overhead: hybrid greedy/maximin inference, softmin targets, policy distillation from a pessimistic teacher, mixed maximin/greedy backups.
+(4)~Atari (Pong/Freeway) + DP-DQN on GPU, after (1)--(3).
+
+\section{Conclusion}
+\label{sec:conc}
+We compared vanilla Q-learning, belief-enriched pessimistic Q-learning~\citep{sun2024belief}, and PB-GT---pessimistic behavior, greedy target, greedy test---on a $500$-seed tabular GridWorld and a $5$-seed CartPole Double-DQN port.
+The discrete result is clear: full pessimism is far more robust under learned attacks; PB-GT is far cheaper at test time and only slightly better than vanilla.
+The deep port is not yet a robustness result.
+A scoped reading of this v1 is therefore: \emph{the robustness--compute tradeoff of belief-maximin Q-learning is real; PB-GT is a well-defined fast baseline that does not close the gap}.
+Closing that gap, on the same environments used by~\citet{sun2024belief}, is the natural next paper.
+
+\section*{Acknowledgments}
+We thank Xiaolin Sun for the ICLR 2024 paper and open-source BP/DP-DQN codebase that this work builds on, and Yibin for workstation access for future deep experiments.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+\bibitem{huang2017adversarial}
+S.~Huang, N.~Papernot, I.~Goodfellow, Y.~Duan, and P.~Abbeel.
+Adversarial attacks on neural network policies.
+In \emph{ICLR Workshop}, 2017.
+
+\bibitem{ilahi2022challenges}
+I.~Ilahi, M.~Usama, J.~Qadir, M.~U.~Janjua, A.~Al-Fuqaha, D.~T.~Hoang, and D.~Niyato.
+Challenges and countermeasures for adversarial attacks on deep reinforcement learning.
+\emph{IEEE TAI}, 2022.
+
+\bibitem{li2024car}
+H.~Li, Z.~Zhang, et~al.
+Towards optimal adversarial robust Q-learning with Bellman infinity-error.
+arXiv:2402.02165, 2024.
+
+\bibitem{liang2022wocar}
+Y.~Liang, Y.~Sun, R.~Zheng, and F.~Huang.
+Efficient adversarial training without attacking: Worst-case-aware robust reinforcement learning.
+In \emph{NeurIPS}, 2022.
+
+\bibitem{ma2020pfrnn}
+X.~Ma, P.~Karkus, D.~Hsu, W.~S.~Lee, and N.~Ye.
+Particle filter recurrent neural networks.
+In \emph{AAAI}, 2020.
+
+\bibitem{mnih2015human}
+V.~Mnih, K.~Kavukcuoglu, D.~Silver, et~al.
+Human-level control through deep reinforcement learning.
+\emph{Nature}, 518:529--533, 2015.
+
+\bibitem{sun2024belief}
+X.~Sun and Z.~Zheng.
+Belief-enriched pessimistic Q-learning against adversarial state perturbations.
+In \emph{ICLR}, 2024.
+
+\bibitem{van2016deep}
+H.~van Hasselt, A.~Guez, and D.~Silver.
+Deep reinforcement learning with double Q-learning.
+In \emph{AAAI}, 2016.
+
+\bibitem{watkins1992q}
+C.~J.~C.~H.~Watkins and P.~Dayan.
+Q-learning.
+\emph{Machine Learning}, 8(3--4):279--292, 1992.
+
+\bibitem{zhang2020robust}
+H.~Zhang, H.~Chen, C.~Xiao, B.~Li, M.~Liu, D.~Boning, and C.-J.~Hsieh.
+Robust deep reinforcement learning against adversarial perturbations on state observations.
+In \emph{NeurIPS}, 2020.
+
+\bibitem{zhang2021robust}
+H.~Zhang, H.~Chen, D.~Boning, and C.-J.~Hsieh.
+Robust reinforcement learning on state observations with learned optimal adversary.
+In \emph{ICLR}, 2021.
+\end{thebibliography}
+
+\appendix
+\section{PB-GT DQN pseudocode}
+\label{app:alg}
+Format mirrors Appendix~E, Algorithm~4 of~\citet{sun2024belief}. Differences from BP-DQN are in \textbf{bold}.
+
+\paragraph{Algorithm A: PB-GT DQN --- training.}
+\textbf{Input:} iterations $T$; pretrained vanilla $Q_v$; belief model $N_p$; target-update period $Z$; batch $D$; exploration $\varepsilon'$; budget $\varepsilon$; PGD candidates $K$.\\
+\textbf{Output:} fine-tuned $Q_g$.
+\begin{enumerate}[leftmargin=1.2em]
+\item $\mathcal{B}\leftarrow\emptyset$; $Q_g\leftarrow Q_v$; $Q'\leftarrow Q_v$; init $N_p$ history.
+\item \textbf{Optionally freeze all layers of $Q_g$ except the last linear head; use a small LR.}
+\item For $t=0,\ldots,T{-}1$:
+\item\quad Random-search PGD ($K$ candidates) for $\tilde s_t\in B_\varepsilon(s_t)$ minimizing $Q_g(s_t,\pi(\tilde s_t))$.
+\item\quad Form $M_t$ from $N_p$ (or sample in $B_\varepsilon(\tilde s_t)$).
+\item\quad $a_t=\arg\max_a\min_{m\in M_t}Q_g(m,a)$ w.p.\ $1-\varepsilon'$, else random.
+\item\quad Update $N_p$ history; execute $a_t$; observe $R_t$ and \textbf{true} $s_{t+1}$.
+\item\quad Store $(s_t,a_t,R_t,s_{t+1},M_{t+1})$ in $\mathcal{B}$ (belief stored for parity; \textbf{unused in the target}).
+\item\quad Sample minibatch of size $D$. Set \textbf{greedy Double-DQN targets}
+\[
+y_i=
+\begin{cases}
+R_i & \text{if }s_{i+1}\text{ terminal,}\\
+R_i+\gamma\,Q'\bigl(s_{i+1},\arg\max_{a'}Q_g(s_{i+1},a')\bigr) & \text{otherwise.}
+\end{cases}
+\]
+\textbf{Do not} use $\max_{a'}\min_{m\in M_{i+1}}Q'(m,a')$.
+\item\quad Gradient step on Huber $\sum_i (y_i-Q_g(s_i,a_i))^2$; update $Q'$ every $Z$ episodes.
+\end{enumerate}
+
+\paragraph{Algorithm B: PB-GT DQN --- testing.}
+For each step: observe $\tilde s_t$; take $a_t=\arg\max_a Q_g(\tilde s_t,a)$ (\textbf{no} $M_t$, \textbf{no} maximin); execute $a_t$.
+
+\section{Hyperparameters}
+\label{app:hyper}
+
+\paragraph{GridWorld.}
+Size $5{\times}5$; $R{=}-1$ default, $+10$ gold, $-10$ bomb; $\gamma{=}1$; $\alpha$ annealed $0.1\to 0.005$ (vanilla) / $0.1\to 0.01$ (robust); $\varepsilon$-greedy $0.2\to 0.01$ during robust train; vanilla $2000$ episodes; pes./PB-GT $500$ fine-tune episodes; eval $100$ episodes; max steps $1000$; attacker SB3 DQN, $\mathrm{MlpPolicy}$, $[256,128]$, $2{\times}10^5$ steps, lr $10^{-3}$, $\gamma{=}1$.
+
+\paragraph{CartPole vanilla DQN.}
+MLP $[128,128]$ ReLU; Adam $10^{-3}$; $\gamma{=}0.99$; buffer $10^5$; batch $128$; learn start $10^3$; train every $4$ steps; target copy every $10$ episodes; $\varepsilon$: $1.0\to 0.01$ over $50$k steps; Huber; grad clip $10$; $5{\times}10^5$ steps (+ continue if clean ${<}475$).
+
+\paragraph{Belief (CartPole).}
+GRU hidden $64$; $\kappa{=}20$; $30$k pretrain steps; Adam $10^{-3}$; mode \texttt{learned}.
+
+\paragraph{Pessimistic fine-tune.}
+Clone vanilla; freeze backbone; LR $5{\cdot}10^{-5}$; $\leq 10^5$ steps; $\varepsilon$ $0.02\to 0.005$ / $15$k; mid-eval every $25$k; early stop after best greedy $\geq 475$ if greedy ${<}400$ or drop ${>}75$; restore best; maximin target and test.
+
+\paragraph{PB-GT fine-tune.}
+Clone vanilla; freeze backbone; LR $10^{-5}$; $4{\times}10^4$ steps; $\varepsilon$ $0.01\to 0.005$ / $10$k; pessimistic behavior + PGD $\tilde s$; greedy target; greedy test.
+
+\paragraph{Matched attackers (CartPole).}
+SB3 DQN $[128,128]$; $8{\times}10^4$ steps per (seed, defender); lr $10^{-3}$; buffer $5{\times}10^4$; batch $128$; $\gamma{=}0.99$; explore fraction $0.3$, final $\varepsilon{=}0.05$.
+
+\section{Code and data}
+\label{app:code}
+GridWorld: \texttt{main\_with\_vanilla.py}, \texttt{gridworld\_experiments\_500runs.csv}.
+CartPole: \texttt{main\_cartpole\_dqn.py}, \texttt{cartpole\_belief.py}, \texttt{cartpole\_experiments\_restore\_5runs.csv}.
+BP/DP-DQN reference code: \url{https://github.com/SliencerX/Belief-enriched-robust-Q-learning}.
+CAR-DQN (future baseline): \url{https://github.com/leoranlmia/CAR-DQN}.
+
+\end{document}

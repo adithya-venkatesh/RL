@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CartPole DQN — Algorithms, Metrics &amp; Setup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.55;max-width:860px;margin:2rem auto;padding:0 1.25rem 4rem;color:#1a1a1a;background:#fff}
+h1,h2,h3{line-height:1.25} h1{font-size:1.75rem;border-bottom:1px solid #ddd;padding-bottom:.4rem} h2{font-size:1.35rem;margin-top:2rem;border-bottom:1px solid #eee;padding-bottom:.3rem} h3{font-size:1.1rem;margin-top:1.4rem}
+code{background:#f4f4f5;padding:.1em .35em;border-radius:4px;font-size:.92em} pre{background:#f4f4f5;padding:1rem;overflow-x:auto;border-radius:8px} pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.92rem} th,td{border:1px solid #ddd;padding:.45rem .6rem;text-align:left;vertical-align:top} th{background:#f7f7f8} .math-display{margin:1.1rem 0;overflow-x:auto} hr{border:none;border-top:1px solid #ddd;margin:2rem 0} ul,ol{padding-left:1.4rem} strong{font-weight:600}
+@media print { body{max-width:none;margin:0;padding:.4in} h1,h2,h3{break-after:avoid} table,pre{break-inside:avoid} }
+</style></head><body>
+<h1>CartPole DQN Extension — Algorithms, Pseudocode, Metrics & Setup</h1>
+
+
+<p><strong>Reference:</strong> Sun & Zheng (ICLR 2024) — *Belief-Enriched Pessimistic Q-Learning Against Adversarial State Perturbations*   <strong>Code:</strong> <code>main_cartpole_dqn.py</code> (currently shipped as <code>main_cartpole_dqn.txt</code>), <code>cartpole_belief.py</code>   <strong>Environment:</strong> CartPole-v1 (Gymnasium)</p>
+
+<hr>
+
+<h2>1. The three algorithms (plain language + technical detail)</h2>
+
+<p><strong>Naming note.</strong> All three methods use Q-learning / DQN and are therefore *off-policy* in the classical RL sense (the behavior that generates data need not match the greedy target policy). In prior emails we called the third method “off-policy DQN,” which is misleading. Below we rename it <strong>Pessimistic-Behavior / Greedy-Target DQN (PB-GT DQN)</strong>.</p>
+
+<p>Xiaolin’s paper presents <strong>two</strong> deep pessimistic variants:</p>
+
+
+<table>
+<tr><th>Paper variant</th><th>Algorithms</th><th>Belief mechanism</th></tr>
+<tr><td>**BP-DQN**</td><td>Alg. 4 (train), Alg. 5 (test)</td><td>PF-RNN particles from observation–action history</td></tr>
+<tr><td>**DP-DQN**</td><td>Alg. 6–7</td><td>Diffusion purification of pixel observations</td></tr>
+</table>
+
+
+<p>Our CartPole pessimistic method is a <strong>BP-DQN-style</strong> port (maximin over a belief set + pessimistic Bellman target), <strong>not</strong> DP-DQN. Belief update <strong>is included</strong> in the fair 5-seed runs (<code>belief_mode=learned</code> in <code>cartpole_experiments_fair_v2.csv</code>), via a pretrained GRU belief RNN that emits κ particles in <span class="math-inline">$B_ε(\tilde s)$</span>. This is a simplified PF-RNN analogue, not the exact particle-filter RNN of Ma et al. (2020) used in Xiaolin’s continuous Gridworld.</p>
+
+<hr>
+
+
+
+<h3>1.1 Vanilla Double DQN</h3>
+
+<p><strong>Idea.</strong> Standard deep Q-learning with no notion of observation attack. The agent always sees the true (normalized) CartPole state.</p>
+
+<p><strong>Train.</strong> ε-greedy exploration on the true state <span class="math-inline">$s$</span>. Transitions <span class="math-inline">$(s,a,r,s&#x27;)$</span> go into a replay buffer. Updates use Double DQN / Huber loss:</p>
+
+<p><div class="math-display">$$y = r + \gamma(1-\mathrm{done}) Q_{\theta&#x27;}(s&#x27;, \arg\max_{a&#x27;} Q_\theta(s&#x27;,a&#x27;)).$$</div></p>
+
+<p><strong>Test (clean or under attack).</strong> Greedy action on what the defender observes:</p>
+
+<p><div class="math-display">$$a = \arg\max_a Q_\theta(s_{\mathrm{obs}}, a),$$</div></p>
+
+<p>where <span class="math-inline">$s_{\mathrm{obs}}=s$</span> if clean and <span class="math-inline">$s_{\mathrm{obs}}=\tilde s$</span> under attack. There is <strong>no</strong> belief and <strong>no</strong> maximin.</p>
+
+<p><strong>CartPole specifics.</strong> MLP <span class="math-inline">$Q$</span> with hidden layers <code>[128,128]</code>; observations linearly scaled to roughly <span class="math-inline">$[-1,1]$</span>; 500k environment steps from scratch (with a solve-gate retry if clean eval < 475).</p>
+
+<hr>
+
+
+
+<h3>1.2 Belief-enriched pessimistic DQN (BP-DQN-style)</h3>
+
+<p><strong>Idea.</strong> The defender never trusts a single observation. Given a (possibly perturbed) observation <span class="math-inline">$\tilde s$</span>, it forms a <strong>belief</strong> <span class="math-inline">$M$</span> — a finite set of candidate true states — and chooses the action that looks best in the *worst* candidate (maximin). The same principle is baked into the Bellman target so training and testing are consistent.</p>
+
+<p><strong>Which paper variant?</strong> Closest to <strong>BP-DQN</strong> (Algorithms 4–5): belief particles + maximin action + maximin TD target, fine-tuned from a pretrained vanilla DQN. We do <strong>not</strong> use DP-DQN / diffusion (inappropriate for low-dimensional CartPole, and unused in our code).</p>
+
+<p><strong>Belief update (included).</strong> Before robust fine-tuning we pretrain a small <strong>BeliefRNN</strong> (GRU + particle head) for 30k steps on clean vanilla rollouts with synthetic <span class="math-inline">$L_∞$</span> noise. At each defender step:</p>
+
+<ol><li>Append the current observation to the recurrent state.</li><li>Emit κ = 20 particle offsets via <span class="math-inline">$\tanh(\cdot)\cdotε$</span>, clipped into valid CartPole bounds.</li><li>Use that particle set as <span class="math-inline">$M_t$</span>.</li></ol>
+
+<p>Legacy fallback (ablation): i.i.d. uniform samples in <span class="math-inline">$B_ε(\tilde s)$</span> with <strong>no</strong> history (*UniformBallBelief*). Fair reported runs used <code>learned</code> belief.</p>
+
+<p><strong>Train (after cloning vanilla weights).</strong></p>
+
+<ol><li>Soften training: freeze MLP backbone, train only the final linear head; lower LR and ε.</li><li>At each step, form a worst-case observation <span class="math-inline">$\tilde s$</span> via random-search PGD (32 candidates in the <span class="math-inline">$L_∞$</span> ball, score <span class="math-inline">$Q(s,\pi(\tilde s))$</span>).</li><li>Behavior policy: ε-greedy over the **maximin** action</li></ol>
+
+<p><div class="math-display">$$\pi(\tilde s)=\arg\max_{a}\min_{m\in M} Q_\theta(m,a).$$</div></p>
+
+<ol><li>Store true transition plus next belief <span class="math-inline">$(s,a,r,s&#x27;,M&#x27;)$</span> in a belief replay buffer.</li><li>TD target (Algorithm 4, line 13):</li></ol>
+
+<p><div class="math-display">$$y = r + \gamma(1-\mathrm{done})\max_{a&#x27;}\min_{m\in M&#x27;} Q_{\theta&#x27;}(m,a&#x27;).$$</div></p>
+
+<ol><li>Mid-training clean eval every 25k steps; keep best checkpoint; early-stop if the policy collapses after reaching ≥475.</li></ol>
+
+<p><strong>Test under attack.</strong> Maximin over the belief centered at the attacker’s <span class="math-inline">$\tilde s$</span> (Algorithm 5 style). Clean tables also report *greedy on true <span class="math-inline">$s$</span>* for comparability with GridWorld’s clean column.</p>
+
+<hr>
+
+
+
+<h3>1.3 Pessimistic-behavior / greedy-target DQN (PB-GT DQN)</h3>
+
+<p>*(formerly “off-policy DQN” / “off-policy greedy target”)*</p>
+
+<p><strong>Idea.</strong> Keep the <strong>robust data-collection behavior</strong> of pessimistic DQN (act with maximin under a PGD-perturbed observation, maintain beliefs while rolling out), but <strong>change the learning target</strong> to ordinary greedy bootstrap on the *true* next state — the same target vanilla DQN uses. At test time, drop belief/maximin entirely and act greedily on the observed state. This is the deep analogue of our tabular GridWorld extension (Eq. 5.1–5.2 in our annotated GridWorld code): a deliberate <strong>behavior–target mismatch</strong> designed for faster inference while still seeing pessimistic rollouts during training.</p>
+
+<p><strong>Why not call it “off-policy DQN”?</strong> Vanilla and pessimistic DQN are also off-policy. The distinctive claim is the *pairing* of pessimistic behavior with a non-pessimistic (greedy) target and greedy test policy.</p>
+
+<p><strong>Train.</strong> Same collection loop as pessimistic (PGD <span class="math-inline">$\tilde s$</span>, ε-greedy maximin, belief particles stored). Update rule uses Double DQN greedy targets on true <span class="math-inline">$s&#x27;$</span>, <strong>ignoring</strong> <span class="math-inline">$M&#x27;$</span> in the backup:</p>
+
+<p><div class="math-display">$$y = r + \gamma(1-\mathrm{done}) Q_{\theta&#x27;}(s&#x27;, \arg\max_{a&#x27;} Q_\theta(s&#x27;,a&#x27;)).$$</div></p>
+
+<p>Default fine-tune: 40k steps, LR <span class="math-inline">$10^{-5}$</span>, ε start 0.01 (shorter/gentler than pessimistic’s 100k / <span class="math-inline">$5\cdot10^{-5}$</span>).</p>
+
+<p><strong>Test.</strong> Identical to vanilla: <span class="math-inline">$a=\arg\max_a Q(\tilde s,a)$</span> under attack; no belief, no maximin → ~50× faster than pessimistic under matched attack in our runs.</p>
+
+<hr>
+
+
+
+<h3>Comparison snapshot</h3>
+
+
+<table>
+<tr><th></th><th>Vanilla DQN</th><th>Pessimistic (BP-style)</th><th>PB-GT DQN (3rd method)</th></tr>
+<tr><td>Behavior at train</td><td>ε-greedy on true <span class="math-inline">$s$</span></td><td>ε-greedy **maximin** on PGD <span class="math-inline">$\tilde s$</span></td><td>same as pessimistic</td></tr>
+<tr><td>Bellman target</td><td>greedy on true <span class="math-inline">$s&#x27;$</span></td><td><span class="math-inline">$\max\min$</span> over next belief <span class="math-inline">$M&#x27;$</span></td><td>greedy on true <span class="math-inline">$s&#x27;$</span></td></tr>
+<tr><td>Test under attack</td><td>greedy on <span class="math-inline">$\tilde s$</span></td><td>**maximin** over belief</td><td>greedy on <span class="math-inline">$\tilde s$</span></td></tr>
+<tr><td>Belief update</td><td>none</td><td>yes (learned GRU / optional uniform ball)</td><td>collected but unused in target/test</td></tr>
+<tr><td>Paper counterpart</td><td>vanilla DQN</td><td>BP-DQN (simplified)</td><td>*ours* (not in Xiaolin’s paper)</td></tr>
+</table>
+
+
+<hr>
+
+
+
+<h2>2. Pseudocode for PB-GT DQN (Algorithm-4 style)</h2>
+
+<p>Format mirrors Appendix E, Algorithm 4 (BP-DQN). Differences from Algorithm 4 are highlighted in <strong>bold</strong>.</p>
+
+<hr>
+
+<p><strong>Algorithm A: Pessimistic-Behavior / Greedy-Target DQN (PB-GT DQN) — Training</strong></p>
+
+<p><strong>Data:</strong> Number of iterations <span class="math-inline">$T$</span>; pretrained vanilla Q-network <span class="math-inline">$Q_v$</span>; belief model <span class="math-inline">$N_p$</span> (GRU particle belief); target-update frequency <span class="math-inline">$Z$</span>; batch size <span class="math-inline">$D$</span>; exploration parameter <span class="math-inline">$\varepsilon&#x27;$</span>; attack budget <span class="math-inline">$\varepsilon$</span>; candidate count <span class="math-inline">$K_{\mathrm{PGD}}$</span></p>
+
+<p><strong>Result:</strong> Fine-tuned Q-network <span class="math-inline">$Q_g$</span></p>
+
+<ol><li>Initialize replay buffer <span class="math-inline">$\mathcal{B}$</span>; set <span class="math-inline">$Q_g \leftarrow Q_v$</span>, target <span class="math-inline">$Q&#x27; \leftarrow Q_v$</span>; initialize observation/action history for <span class="math-inline">$N_p$</span></li><li>**Optionally freeze all layers of <span class="math-inline">$Q_g$</span> except the final linear head; set a small learning rate**</li><li>**for** <span class="math-inline">$t = 0,1,\ldots,T$</span> **do**</li><li>Use random-search PGD (<span class="math-inline">$K_{\mathrm{PGD}}$</span> candidates) to find <span class="math-inline">$\tilde s_t \in B_\varepsilon(s_t)$</span> minimizing <span class="math-inline">$Q_g(s_t,\pi(\tilde s_t))$</span>, where <span class="math-inline">$\pi$</span> is greedy w.r.t. <span class="math-inline">$Q_g$</span></li><li>Form belief <span class="math-inline">$M_t$</span> from <span class="math-inline">$N_p$</span> (or intersect / sample in <span class="math-inline">$B_\varepsilon(\tilde s_t)$</span>)</li><li>Choose action with ε-greedy **maximin** behavior:</li></ol>
+<p>  <span class="math-inline">$a_t = \arg\max_{a}\min_{m\in M_t} Q_g(m,a)$</span> with probability <span class="math-inline">$1-\varepsilon&#x27;$</span>; else <span class="math-inline">$a_t$</span> random</p>
+<ol><li>Append <span class="math-inline">$\tilde s_t,a_t$</span> to history; update <span class="math-inline">$N_p$</span> to obtain next belief <span class="math-inline">$M_{t+1}$</span></li><li>Execute <span class="math-inline">$a_t$</span>; observe reward <span class="math-inline">$R_t$</span> and **true** next state <span class="math-inline">$s_{t+1}$</span></li><li>**if** <span class="math-inline">$s_{t+1}$</span> terminal **then** reset belief history</li><li>Store transition <span class="math-inline">$s_t, a_t, R_t, s_{t+1}, M_{t+1}$</span> in <span class="math-inline">$\mathcal{B}$</span></li></ol>
+<p>  *(belief stored for logging / parity with Alg. 4; <strong>not</strong> used in the target below)*</p>
+<ol><li>Sample minibatch <span class="math-inline">$s_i,a_i,R_i,s_{i+1},M_{i+1}$</span> of size <span class="math-inline">$D$</span> from <span class="math-inline">$\mathcal{B}$</span></li><li>**Set greedy (vanilla-style) targets — the key difference from Algorithm 4, line 13:**</li></ol>
+
+<p><div class="math-display">$$y_i =
+   \begin{cases}
+   R_i &amp; \text{if } s_{i+1}\text{ terminal}
+   R_i + \gamma \max_{a&#x27;} Q&#x27;(s_{i+1}, a&#x27;) &amp; \text{otherwise}
+   \end{cases}$$</div></p>
+
+<p>       <strong>(Double DQN in code: <span class="math-inline">$a&#x27;=\arg\max Q_g(s_{i+1},\cdot)$</span>, evaluated with <span class="math-inline">$Q&#x27;$</span>)</strong>          <strong>Do not</strong> use <span class="math-inline">$\max_{a&#x27;}\min_{m\in M_{i+1}} Q&#x27;(m,a&#x27;)$</span></p>
+<ol><li>Gradient step on Huber loss <span class="math-inline">$\sum_i (y_i - Q_g(s_i,a_i))^2$</span> (smooth <span class="math-inline">$L_1$</span>)</li><li>Update target network every <span class="math-inline">$Z$</span> steps (in our CartPole code: every <span class="math-inline">$Z$</span> *episodes*)</li><li>**end for**</li></ol>
+
+<hr>
+
+<p><strong>Algorithm B: PB-GT DQN — Testing</strong></p>
+
+<p><strong>Data:</strong> Trained <span class="math-inline">$Q_g$</span></p>
+
+<ol><li>**for** each step <span class="math-inline">$t$</span> **do**</li><li>Observe (possibly perturbed) state <span class="math-inline">$\tilde s_t$</span></li><li>**Select greedy action** <span class="math-inline">$a_t = \arg\max_a Q_g(\tilde s_t, a)$</span></li></ol>
+<p>  <strong>(No belief <span class="math-inline">$M_t$</span>, no maximin — difference from Algorithm 5)</strong></p>
+<ol><li>Execute <span class="math-inline">$a_t$</span></li><li>**end for**</li></ol>
+
+<hr>
+
+<p><strong>Relation to Algorithm 4.</strong> Collection (lines 4–8) matches BP-DQN’s pessimistic ε-greedy maximin behavior under PGD observations. The backup (line 12) and the test policy (Algorithm B) revert to vanilla greedy. Belief is maintained during training for pipeline uniformity but is intentionally unused in <span class="math-inline">$y_i$</span> and at test time.</p>
+
+<hr>
+
+
+
+<h2>3. Evaluation metrics, hardware, and hyperparameters</h2>
+
+
+
+<h3>3.1 The four reported CartPole metrics</h3>
+
+<p>All scores are <strong>mean episodic return</strong> over 100 evaluation episodes per seed (CartPole-v1 capped at 500), then averaged across seeds. Observation perturbations live in an <span class="math-inline">$L_∞$</span> ball of radius <span class="math-inline">$\varepsilon=0.05$</span> in *raw* CartPole coordinates, then re-normalized.</p>
+
+<h4>(1) Clean</h4>
+
+<p>No attacker. Defender observes the true state.</p>
+
+<ul><li>Vanilla & PB-GT: greedy on <span class="math-inline">$s$</span>.</li><li>Pessimistic: we report **greedy on <span class="math-inline">$s$</span>** as the primary clean number (GridWorld parity); CSV also logs maximin-on-clean as `pessimistic_test_maximin_`*.</li></ul>
+
+
+
+<h4>(2) Matched attacker</h4>
+
+<p><strong>Per-defender learned adversary.</strong> For each seed we train a separate Stable-Baselines3 DQN attacker *against that defender*, then evaluate that defender against *its own* attacker.</p>
+
+<ul><li>Attacker action space: discrete <span class="math-inline">$3^4=81$</span> choices — each obs dimension gets <span class="math-inline">$\delta_i\in-\varepsilon,0,+\varepsilon$</span>.</li><li>Attacker reward = −defender reward; attacker sees the true state, applies <span class="math-inline">$\delta$</span>, defender sees <span class="math-inline">$\tilde s=\mathrm{clip}(s+\delta)$</span>.</li><li>Vanilla / PB-GT defend with greedy on <span class="math-inline">$\tilde s$</span>; pessimistic defends with **maximin over belief** at <span class="math-inline">$\tilde s$</span>.</li><li>Attackers are trained for 80k steps after defenders are frozen.</li></ul>
+
+<p>This answers: “How robust is each method against an adversary specialized to *it*?” It is <strong>not</strong> the same threat for all three methods (attack strength can differ).</p>
+
+<h4>(3) Shared random <span class="math-inline">$\delta$</span></h4>
+
+<p><strong>Identical weak threat distribution across defenders.</strong> For each <span class="math-inline">$(\mathrm{seed},\mathrm{episode},\mathrm{step})$</span> we draw one <span class="math-inline">$\delta\sim\mathrm{Unif}([-\varepsilon,\varepsilon]^4)$</span> from a shared RNG stream and apply it to that defender’s true state. Every method faces the *same* random perturbation process (though trajectories diverge after the first differing action).</p>
+
+<p>This answers: “Under a fixed, non-adaptive noise model, how do the three policies compare?” It removes confounding from matched-attacker specialization.</p>
+
+<h4>(4) Worst-case (PGD*)</h4>
+
+<p><strong>Defender-specific approximate worst-case search</strong> (not a single shared PGD path). At each step, sample 32 random <span class="math-inline">$\delta$</span> in the <span class="math-inline">$L_∞$</span> ball and pick</p>
+
+<p><div class="math-display">$$\tilde s^\star=\arg\min_{\tilde s\in B_\varepsilon(s)} Q\bigl(s,\pi(\tilde s)\bigr)$$</div></p>
+
+<p>with <span class="math-inline">$\pi$</span> = greedy for vanilla/PB-GT and maximin for pessimistic. Then the defender acts on <span class="math-inline">$\tilde s^\star$</span> with its usual test policy.</p>
+
+<p><strong>Caveat (important for the paper).</strong> This is *not* shared across algorithms the way Xiaolin’s Appendix F PGD eval is; each defender’s Q-landscape defines its own “worst” <span class="math-inline">$\tilde s$</span>. In tables we mark it <strong>PGD</strong> / “defender-specific worst-case (32 candidates).”</p>
+
+<p><strong>Inference timing.</strong> Under matched attack we also record ms/step. Pessimistic maximin was ~2.0 ms/step vs ~0.04 ms/step for greedy (≈52×), analogous in spirit to GridWorld’s robustness–speed tradeoff.</p>
+
+<hr>
+
+
+
+<h3>3.2 Hardware and software (Appendix F.2 style)</h3>
+
+
+<table>
+<tr><th>Item</th><th>Configuration used for CartPole fair 5-seed runs</th></tr>
+<tr><td>Machine</td><td>Apple MacBook Pro (M1 Pro), 16 GB unified memory</td></tr>
+<tr><td>Accelerator</td><td>Apple Silicon (CPU / MPS available); runs used `device=cpu` in `DQNConfig`</td></tr>
+<tr><td>OS</td><td>macOS 15.7.7 (arm64)</td></tr>
+<tr><td>Python</td><td>3.9.13</td></tr>
+<tr><td>PyTorch</td><td>2.8.0 (CUDA unavailable on this machine)</td></tr>
+<tr><td>Gymnasium</td><td>1.1.1 (`CartPole-v1`)</td></tr>
+<tr><td>Stable-Baselines3</td><td>2.7.0 (attacker DQN only)</td></tr>
+<tr><td>Training budget unit</td><td>Environment **steps** (not Atari frames); CartPole episodes ≤ 500 steps</td></tr>
+</table>
+
+
+<p>*Note for arXiv.* Xiaolin’s F.2 used an i9-12900KF + RTX 3090. Our CartPole numbers were produced on CPU Apple Silicon. For the requested Pong/Freeway reproduction we should use a GPU workstation (as offered) and restate hardware there.</p>
+
+<hr>
+
+
+
+<h3>3.3 Hyperparameters (CartPole)</h3>
+
+
+
+<h4>Environment / attack</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Environment</td><td>CartPole-v1</td></tr>
+<tr><td>Observation preprocessing</td><td>Linear normalize each dim to <span class="math-inline">$[-1,1]$</span> using `[±4.8, ±5, ±0.418, ±5]`</td></tr>
+<tr><td>Action space</td><td>Discrete(2)</td></tr>
+<tr><td>Attack budget <span class="math-inline">$\varepsilon$</span></td><td>0.05 (raw units, <span class="math-inline">$L_∞$</span>)</td></tr>
+<tr><td>PGD candidates (train + PGD eval)</td><td>32 random <span class="math-inline">$\delta$</span></td></tr>
+<tr><td>Attacker discrete grid</td><td>81 actions (<span class="math-inline">$3^4$</span>)</td></tr>
+<tr><td>Eval episodes per metric</td><td>100</td></tr>
+<tr><td>Seeds (fair table)</td><td>5 (`0`–`4`)</td></tr>
+</table>
+
+
+
+
+<h4>Vanilla Double DQN</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Network</td><td>MLP `[128, 128]`, ReLU</td></tr>
+<tr><td>Optimizer</td><td>Adam, lr <span class="math-inline">$10^{-3}$</span></td></tr>
+<tr><td>Discount <span class="math-inline">$\gamma$</span></td><td>0.99</td></tr>
+<tr><td>Replay buffer</td><td>100,000</td></tr>
+<tr><td>Batch size</td><td>128</td></tr>
+<tr><td>Learning starts</td><td>1,000</td></tr>
+<tr><td>Train frequency</td><td>every 4 steps</td></tr>
+<tr><td>Target update</td><td>every 10 episodes (hard copy)</td></tr>
+<tr><td>ε schedule</td><td>start 1.0 → end 0.01, exponential decay over 50k steps</td></tr>
+<tr><td>Loss</td><td>Huber (`smooth_L1`)</td></tr>
+<tr><td>Gradient clip</td><td>max-norm 10</td></tr>
+<tr><td>Training steps</td><td>500,000 (+ up to 2×200k continue if clean eval < 475)</td></tr>
+</table>
+
+
+
+
+<h4>Belief model (BP-style)</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Architecture</td><td>GRU (hidden 64) + particle head → κ×4 deltas + next-obs head</td></tr>
+<tr><td>κ (belief size)</td><td>20 (paper BP-DQN uses κₚ=30 on continuous Gridworld)</td></tr>
+<tr><td>Pretrain steps</td><td>30,000 on vanilla rollouts + synthetic noise</td></tr>
+<tr><td>Pretrain optimizer</td><td>Adam, lr <span class="math-inline">$10^{-3}$</span></td></tr>
+<tr><td>Fair-run mode</td><td>`learned` (GRU); `uniform` available as ablation</td></tr>
+</table>
+
+
+
+
+<h4>Pessimistic fine-tune (BP-style)</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Init</td><td>Clone vanilla weights</td></tr>
+<tr><td>Backbone</td><td>Frozen; train final linear layer only</td></tr>
+<tr><td>LR</td><td><span class="math-inline">$5\cdot 10^{-5}$</span></td></tr>
+<tr><td>Max fine-tune steps</td><td>100,000</td></tr>
+<tr><td>ε start / end / decay</td><td>0.02 / 0.005 / 15k steps</td></tr>
+<tr><td>Mid-eval</td><td>every 25k steps (20 episodes greedy + maximin)</td></tr>
+<tr><td>Early stop</td><td>after best greedy ≥ 475, stop if greedy < 400 or drops > 75 from best</td></tr>
+<tr><td>Checkpointing</td><td>restore best mid-eval weights at end</td></tr>
+<tr><td>TD target</td><td><span class="math-inline">$\max\min$</span> over next belief (Alg. 4)</td></tr>
+<tr><td>Test under attack</td><td>maximin over belief (Alg. 5)</td></tr>
+</table>
+
+
+
+
+<h4>PB-GT fine-tune (3rd algorithm)</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Init</td><td>Clone vanilla weights</td></tr>
+<tr><td>Backbone</td><td>Frozen (via shared `prepare_robust_finetune`)</td></tr>
+<tr><td>LR</td><td><span class="math-inline">$10^{-5}$</span></td></tr>
+<tr><td>Fine-tune steps</td><td>**40,000** (shorter; 100k destroyed clean policy in pilots)</td></tr>
+<tr><td>ε start / end / decay</td><td>0.01 / 0.005 / 10k steps</td></tr>
+<tr><td>Behavior</td><td>same pessimistic maximin + PGD <span class="math-inline">$\tilde s$</span> as above</td></tr>
+<tr><td>TD target</td><td>Double DQN **greedy** on true <span class="math-inline">$s&#x27;$</span></td></tr>
+<tr><td>Test</td><td>greedy on <span class="math-inline">$\tilde s$</span> (no belief)</td></tr>
+</table>
+
+
+
+
+<h4>Learned attackers (matched metric)</h4>
+
+
+<table>
+<tr><th>Parameter</th><th>Value</th></tr>
+<tr><td>Algorithm</td><td>SB3 DQN, `MlpPolicy`, net `[128,128]`</td></tr>
+<tr><td>Steps</td><td>80,000 per (seed, defender)</td></tr>
+<tr><td>LR / buffer / batch</td><td><span class="math-inline">$10^{-3}$</span> / 50k / 128</td></tr>
+<tr><td>γ / train_freq / target_update</td><td>0.99 / 4 / 500</td></tr>
+<tr><td>Exploration</td><td>fraction 0.3, final ε 0.05</td></tr>
+</table>
+
+
+<hr>
+
+
+
+<h3>3.4 Gaps vs Xiaolin Appendix F.2 (to state explicitly)</h3>
+
+<ol><li>**Environment:** CartPole-v1, not continuous Gridworld or Atari Pong/Freeway.</li><li>**Belief:** Simplified GRU particle model, not full PF-RNN; κ=20 vs κₚ=30.</li><li>**PGD:** 32-sample random search, not 10-step iterative PGD with η=10 as in the paper.</li><li>**Attacks evaluated:** matched SB3 DQN attacker, shared uniform δ, defender-specific PGD — not MinBest / PA-AD.</li><li>**Hardware / scale:** CPU laptop, n=5 seeds; paper used RTX 3090 and (for Atari) multi-million-frame training.</li><li>**Vanilla clean variance:** mean 421 ± 176 with seed 2 failing (107) — consistent with the concern that vanilla may not have fully converged on all seeds.</li></ol>
+
+<hr>
+
+</body></html>
