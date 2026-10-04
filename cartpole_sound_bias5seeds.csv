@@ -1,0 +1,11 @@
+seed,eps,attack,n_ep,source,greedy,greedy_best_delta,uniform,uniform_best_delta,sound,sound_best_delta
+0,0.05,worst_of_9_const_bias,20,epssweep_v2,90.5,500.0,500.0,500.0,500.0,500.0
+0,0.05,exhaustive_greedy_9,20,epssweep_v2,500.0,,423.95,,500.0,
+1,0.05,worst_of_9_const_bias,20,epssweep_v2,11.5,500.0,378.6,500.0,500.0,500.0
+1,0.05,exhaustive_greedy_9,20,epssweep_v2,476.0,,500.0,,500.0,
+2,0.05,worst_of_9_const_bias,20,this_run,500.0,500.0,500.0,500.0,500.0,500.0
+2,0.05,exhaustive_greedy_9,20,this_run,497.2,,16.85,,500.0,
+3,0.05,worst_of_9_const_bias,20,this_run,108.25,500.0,119.05,500.0,167.1,500.0
+3,0.05,exhaustive_greedy_9,20,this_run,42.55,,15.3,,96.7,
+4,0.05,worst_of_9_const_bias,20,this_run,183.8,500.0,63.1,500.0,476.15,500.0
+4,0.05,exhaustive_greedy_9,20,this_run,500.0,,305.95,,500.0,

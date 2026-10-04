@@ -1,0 +1,87 @@
+{
+  "defenders": {
+    "attacker_vanilla_final_v3_0": {
+      "def_type": "vanilla",
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 11001,
+      "zip": "attacker_vanilla_final_v3_0.zip",
+      "train_wall_sec": 90.411480834,
+      "skipped_existing": false
+    },
+    "attacker_vanilla_final_v3_1": {
+      "def_type": "vanilla",
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 11002,
+      "zip": "attacker_vanilla_final_v3_1.zip",
+      "train_wall_sec": 89.485300916,
+      "skipped_existing": false
+    },
+    "attacker_vanilla_final_v3_2": {
+      "def_type": "vanilla",
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 11003,
+      "zip": "attacker_vanilla_final_v3_2.zip",
+      "train_wall_sec": 89.25781874999996,
+      "skipped_existing": false
+    },
+    "attacker_pessimistic_final_v3_0": {
+      "def_type": "pessimistic",
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 12001,
+      "zip": "attacker_pessimistic_final_v3_0.zip",
+      "train_wall_sec": 105.91884308399995,
+      "skipped_existing": false
+    },
+    "attacker_pessimistic_final_v3_1": {
+      "def_type": "pessimistic",
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 12002,
+      "zip": "attacker_pessimistic_final_v3_1.zip",
+      "train_wall_sec": 104.24008545799995,
+      "skipped_existing": false
+    },
+    "attacker_pessimistic_final_v3_2": {
+      "def_type": "pessimistic",
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 12003,
+      "zip": "attacker_pessimistic_final_v3_2.zip",
+      "train_wall_sec": 106.77569395800003,
+      "skipped_existing": false
+    },
+    "attacker_offpolicy_final_v3_0": {
+      "def_type": "offpolicy",
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 13001,
+      "zip": "attacker_offpolicy_final_v3_0.zip",
+      "train_wall_sec": 87.72007691700003,
+      "skipped_existing": false
+    },
+    "attacker_offpolicy_final_v3_1": {
+      "def_type": "offpolicy",
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 13002,
+      "zip": "attacker_offpolicy_final_v3_1.zip",
+      "train_wall_sec": 87.04921870800001,
+      "skipped_existing": false
+    },
+    "attacker_offpolicy_final_v3_2": {
+      "def_type": "offpolicy",
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 13003,
+      "zip": "attacker_offpolicy_final_v3_2.zip",
+      "train_wall_sec": 86.73395795800002,
+      "skipped_existing": false
+    }
+  },
+  "wall_sec_total": 847.5936716250001,
+  "per_attacker_mean_sec": 94.17694184255555
+}

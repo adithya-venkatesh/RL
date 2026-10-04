@@ -80,7 +80,7 @@ class GridWorld(gym.Env):
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
     def step(self, action):
@@ -234,7 +234,7 @@ class GridWorld_RL_Attack(gym.Env):
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
     def step(self, action):
@@ -485,7 +485,7 @@ class Q_Agent():
                     q_values = []
                     for i in states:
                         q_values.append(self.q_table_withatt[i][action])
-                    values[action] = np.mean(q_values)
+                    values[action] = min(q_values)
                 value_min[state] = values
 
             for state in self.all_state:
@@ -511,7 +511,7 @@ class Q_Agent():
                     tmp = []
                     for true_state in states:
                         tmp.append(self.q_table_withatt[true_state][action])
-                    values[action] = np.mean(tmp)
+                    values[action] = min(tmp)
                 policy[state] = max(values, key = values.get)
         return policy
 
@@ -534,7 +534,7 @@ class Q_Agent():
                     q_values = []
                     for i in possible_states:
                         q_values.append(self.q_table_withatt[i][action])
-                    values[action] = np.mean(q_values)
+                    values[action] = min(q_values)
                 value_min[state] = values
             elif len(possible_states) == 1:
                 value_min[state] = self.q_table_withatt[list(possible_states)[0]]

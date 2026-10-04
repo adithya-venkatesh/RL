@@ -1,0 +1,30 @@
+CURRENT PAPER LOCK
+Date: 2026-10-03
+Source zip: /Users/adithya/Downloads/paper_FINAL_v3.zip
+Source zip SHA-256: 83ebedd870dfa9fb6ea3692fcd838d2ca1e1ab791f24cc091d64c24aa7341b11
+
+Locked paths (do not overwrite with older copies):
+- arxiv_v1/main.tex
+- arxiv_v1/figures/fig1_gridworld_bars.pdf
+- arxiv_v1/figures/fig2_gridworld_box.pdf
+- arxiv_v1/figures/fig3_inference.pdf
+- arxiv_v1/figures/fig4_cartpole.pdf
+- arxiv_v1/figures/fig5_cartpole_seeds.pdf
+- arxiv_v1/figures/fig6_gridworld_cont.pdf
+
+main.tex SHA-256:
+8a8cfa08214e498a4eec78230d60c74b29b2ce97cd458df270dadd1ed3f0b86a
+
+Figure PDF SHA-256:
+66be7cc0b2d062ed444359491298669e733b14e07464b59454819b910bd78017  fig1_gridworld_bars.pdf
+3c20b8d5b55f637b73e177cf704eb98c2da3ecc0e7f8aebe7d2169b3302141f1  fig2_gridworld_box.pdf
+1af00ec48eafdc8faba5900044b3432f5927a87ba41a1df026040a835993dc0c  fig3_inference.pdf
+f0392409adff0efb4dae2ec46e848e0559edfd959afa0cefc9219b6b7d64c4cb  fig4_cartpole.pdf
+00a5d80f68d823115ee059cf6ede2761830d72f43e0e72d61004b9ae3c7e30c2  fig5_cartpole_seeds.pdf
+47dec6577157f461ade19250298acff42bc4b0b792e1c25bd5522851d873a134  fig6_gridworld_cont.pdf
+
+Notes:
+- Imported from paper_FINAL_v3.zip (main.tex + figures/*.pdf).
+- fig1_gridworld_bars.pdf regenerated from CSVs via build_figures.py; means/stds match Table 3 within 0.01.
+
+RULE: Future agents must NEVER restore an older main.tex or any older figure PDF over these locked files.

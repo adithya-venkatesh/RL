@@ -1,0 +1,4 @@
+comparison,wins,ties,losses,win_rate,tie_rate,loss_rate,metric
+Maximin vs greedy on pes Q (worst-of-22),448,30,22,0.896,0.06,0.044,worst-of-22
+Maximin vs greedy on PB-GT Q (worst-of-22),382,38,80,0.764,0.076,0.16,worst-of-22
+Pes-maximin vs PB-GT-maximin (worst-of-22),327,26,147,0.654,0.052,0.294,worst-of-22

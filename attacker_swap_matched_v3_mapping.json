@@ -1,0 +1,71 @@
+{
+  "defenders": {
+    "attacker_pes_q_greedy_final_v3_0": {
+      "cell": "pes_q_greedy",
+      "agent_type_test": "offpolicy",
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 14001,
+      "zip": "attacker_pes_q_greedy_final_v3_0.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 148.76915474999998,
+      "skipped_existing": false
+    },
+    "attacker_pes_q_greedy_final_v3_1": {
+      "cell": "pes_q_greedy",
+      "agent_type_test": "offpolicy",
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 14002,
+      "zip": "attacker_pes_q_greedy_final_v3_1.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 112.34686516600001,
+      "skipped_existing": false
+    },
+    "attacker_pes_q_greedy_final_v3_2": {
+      "cell": "pes_q_greedy",
+      "agent_type_test": "offpolicy",
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 14003,
+      "zip": "attacker_pes_q_greedy_final_v3_2.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 111.42717962500001,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_final_v3_0": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 15001,
+      "zip": "attacker_pbgt_q_maximin_final_v3_0.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 126.16610299999996,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_final_v3_1": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 15002,
+      "zip": "attacker_pbgt_q_maximin_final_v3_1.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 126.82113620799998,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_final_v3_2": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 15003,
+      "zip": "attacker_pbgt_q_maximin_final_v3_2.zip",
+      "timesteps": 200000,
+      "train_wall_sec": 125.92174812499991,
+      "skipped_existing": false
+    }
+  },
+  "wall_sec_total": 751.4554969169999
+}

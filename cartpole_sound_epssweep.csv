@@ -1,0 +1,7 @@
+eps,attack,greedy,uniform,sound
+0.05,worst_of_9_const_bias,179.0,500.0,500.0
+0.05,exhaustive_greedy_9,500.0,500.0,500.0
+0.1,worst_of_9_const_bias,10.666666666666666,61.0,134.0
+0.1,exhaustive_greedy_9,500.0,235.0,180.33333333333334
+0.2,worst_of_9_const_bias,34.666666666666664,8.666666666666666,8.666666666666666
+0.2,exhaustive_greedy_9,10.0,15.0,21.666666666666668

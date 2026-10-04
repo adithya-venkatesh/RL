@@ -1,0 +1,83 @@
+{
+  "defenders": {
+    "attacker_pes_q_maximin_belief_aware_final_v3_0": {
+      "cell": "pes_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 16001,
+      "zip": "attacker_pes_q_maximin_belief_aware_final_v3_0.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 89.18467016700001,
+      "skipped_existing": false
+    },
+    "attacker_pes_q_maximin_belief_aware_final_v3_1": {
+      "cell": "pes_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 16002,
+      "zip": "attacker_pes_q_maximin_belief_aware_final_v3_1.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 88.407632958,
+      "skipped_existing": false
+    },
+    "attacker_pes_q_maximin_belief_aware_final_v3_2": {
+      "cell": "pes_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 16003,
+      "zip": "attacker_pes_q_maximin_belief_aware_final_v3_2.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 85.37559795800001,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_belief_aware_final_v3_0": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 0,
+      "defender_seed": 99999,
+      "attacker_rng_seed": 17001,
+      "zip": "attacker_pbgt_q_maximin_belief_aware_final_v3_0.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 88.32902187500002,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_belief_aware_final_v3_1": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 1,
+      "defender_seed": 99998,
+      "attacker_rng_seed": 17002,
+      "zip": "attacker_pbgt_q_maximin_belief_aware_final_v3_1.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 84.777379042,
+      "skipped_existing": false
+    },
+    "attacker_pbgt_q_maximin_belief_aware_final_v3_2": {
+      "cell": "pbgt_q_maximin",
+      "agent_type_test": "pessimistic",
+      "belief_aware": true,
+      "attacker_index": 2,
+      "defender_seed": 99997,
+      "attacker_rng_seed": 17003,
+      "zip": "attacker_pbgt_q_maximin_belief_aware_final_v3_2.zip",
+      "timesteps": 200000,
+      "obs": "state2 + belief_mask25",
+      "train_wall_sec": 83.60953074999998,
+      "skipped_existing": false
+    }
+  },
+  "wall_sec_total": 519.6857058749999
+}

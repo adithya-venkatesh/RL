@@ -38,6 +38,7 @@ from cartpole_belief import (
     pretrain_belief_rnn_on_agent,
     save_belief_rnn,
 )
+from cartpole_sound_belief import SoundFilteredBelief, contains, ibp_q_bounds
 
 # CartPole-v1 observation limits used for clipping perturbed states (Eq. 1.4).
 CARTPOLE_LOW = np.array([-4.8, -5.0, -0.418, -5.0], dtype=np.float32)
@@ -57,6 +58,35 @@ def delta_from_discrete_action(action: int, epsilon: float = DEFAULT_ATTACK_EPS)
         delta[i] = levels[rem % PERTURB_LEVELS]
         rem //= PERTURB_LEVELS
     return delta
+
+
+def _note_belief_action(belief_provider: Optional[BeliefProvider], action: int) -> None:
+    """Tell a history-conditioned belief provider which action was taken.
+
+    Needed by SoundFilteredBelief to propagate its box through the true
+    dynamics. Providers without ``note_action`` (uniform / learned GRU) are
+    stateless w.r.t. actions, so this is a no-op for them.
+    """
+    if belief_provider is not None:
+        note = getattr(belief_provider, "note_action", None)
+        if note is not None:
+            note(int(action))
+
+
+def _is_sound_filter(belief_provider: Optional[BeliefProvider]) -> bool:
+    return bool(belief_provider is not None and getattr(belief_provider, "is_sound_filter", False))
+
+
+def _sound_next_belief_particles(
+    belief_provider: BeliefProvider, action: int, fallback_obs: np.ndarray, epsilon: float, kappa: int
+) -> List[np.ndarray]:
+    """Pessimistic TD support: lattice over T(M_t, a) when sound; else observe/sample."""
+    prop = getattr(belief_provider, "propagated_lattice", None)
+    if callable(prop):
+        return prop(int(action))
+    return belief_provider.observe(fallback_obs) if hasattr(belief_provider, "observe") else sample_ball(
+        fallback_obs, epsilon, kappa
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -221,6 +251,7 @@ class CartPoleAttackEnv(gym.Env):
         if self.belief_provider is not None:
             self.belief_provider.observe(self.perturbed_state)
         defender_action = self._defender_action(self.perturbed_state)
+        _note_belief_action(self.belief_provider, defender_action)
         obs, reward, terminated, truncated, info = self.inner.step(defender_action)
         if self.belief_provider is not None:
             self.belief = self.belief_provider.observe(obs)
@@ -331,6 +362,9 @@ class DQNConfig:
     attack_epsilon: float = DEFAULT_ATTACK_EPS
     belief_kappa: int = DEFAULT_BELIEF_KAPPA
     pgd_candidates: int = 32
+    # "particles" = min over the belief particle set (default, legacy behaviour)
+    # "ibp"       = certified IBP lower bound on min over the belief box
+    box_min: str = "particles"
 
 
 class DQNAgent:
@@ -357,10 +391,11 @@ class DQNAgent:
         self.q_net.load_state_dict(other.q_net.state_dict())
         self.target_net.load_state_dict(other.target_net.state_dict())
 
-    def prepare_robust_finetune(self, lr: float = 5e-5, freeze_backbone: bool = True):
+    def prepare_robust_finetune(self, lr: float = 2e-5, freeze_backbone: bool = False):
         """Reset buffers and lower lr/ε for fine-tuning from a trained vanilla policy.
 
-        freeze_backbone: train only the final linear layer (reduces catastrophic forgetting).
+        freeze_backbone: if True, train only the final linear layer. Default False —
+        head-only fine-tune was unstable on CartPole (clean collapses / maximin ~11).
         """
         self.replay_buffer = ReplayBuffer(self.config.buffer_size)
         self.belief_replay_buffer = BeliefReplayBuffer(self.config.buffer_size, self.config.belief_kappa)
@@ -387,9 +422,9 @@ class DQNAgent:
         self.q_net.load_state_dict({k: v.to(device) for k, v in snap.items()})
         self.update_target()
 
-    def prepare_offpolicy_finetune(self, lr: float = 1e-5):
+    def prepare_offpolicy_finetune(self, lr: float = 1e-5, freeze_backbone: bool = False):
         """Gentler fine-tune for off-policy greedy (Eq. 5.1–5.2): pessimistic behavior, greedy target."""
-        self.prepare_robust_finetune(lr=lr)
+        self.prepare_robust_finetune(lr=lr, freeze_backbone=freeze_backbone)
         self.config.epsilon_start = 0.01
         self.config.epsilon_end = 0.005
         self.config.epsilon_decay_steps = 10_000
@@ -417,6 +452,11 @@ class DQNAgent:
         """**Eq. 3.4 / Algorithm 5, Line 7:** a = argmax_a min_{m∈M∩B_ε(s̃)} Q(m,a)"""
         if particles is None:
             if belief_provider is not None:
+                if getattr(self.config, "box_min", "particles") == "ibp":
+                    box_at = getattr(belief_provider, "box_at", None)
+                    if box_at is not None:
+                        lo, hi = box_at(center_state)
+                        return int(np.argmax(ibp_q_bounds(self.q_net, lo, hi)[0]))
                 particles = belief_provider.particles_at(center_state)
             else:
                 particles = sample_ball(center_state, epsilon, kappa)
@@ -459,15 +499,27 @@ class DQNAgent:
             return rewards_t + self.config.gamma * next_q * (1.0 - dones_t)
 
     def _compute_pessimistic_td_targets(
-        self, rewards: np.ndarray, next_beliefs: np.ndarray, dones: np.ndarray
+        self,
+        rewards: np.ndarray,
+        next_beliefs: np.ndarray,
+        dones: np.ndarray,
+        softmin_temp: float = 0.0,
     ) -> torch.Tensor:
-        """**Eq. 2.6 / Algorithm 4, Line 13:** y = r + γ max_{a′} min_{m∈M′} Q_θ′(m,a′)"""
+        """**Eq. 2.6 / Algorithm 4, Line 13:** y = r + γ max_{a′} min_{m∈M′} Q_θ′(m,a′)
+
+        If softmin_temp > 0, replace hard min with softmin over particles (smoother).
+        """
         with torch.no_grad():
             batch, kappa, _ = next_beliefs.shape
             nb = torch.as_tensor(next_beliefs, dtype=torch.float32, device=self.device)
             nb_flat = nb.view(batch * kappa, self.obs_dim)
             q_all = self.target_net(nb_flat).view(batch, kappa, self.n_actions)
-            min_per_action = q_all.min(dim=1).values
+            if softmin_temp and softmin_temp > 0:
+                # softmin_m Q(m,a) = -τ logsumexp(-Q/τ)
+                tau = softmin_temp
+                min_per_action = -tau * torch.logsumexp(-q_all / tau, dim=1)
+            else:
+                min_per_action = q_all.min(dim=1).values
             max_q = min_per_action.max(dim=1).values
             rewards_t = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
             dones_t = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
@@ -488,7 +540,12 @@ class DQNAgent:
         self.optimizer.step()
         return float(loss.item())
 
-    def train_step_pessimistic(self) -> Optional[float]:
+    def train_step_pessimistic(
+        self,
+        softmin_temp: float = 0.0,
+        teacher: Optional["DQNAgent"] = None,
+        distill_coef: float = 0.0,
+    ) -> Optional[float]:
         if len(self.belief_replay_buffer) < self.config.learning_starts:
             return None
         states, actions, rewards, next_states, dones, beliefs = self.belief_replay_buffer.sample(
@@ -496,9 +553,16 @@ class DQNAgent:
         )
         states_t = torch.as_tensor(states, dtype=torch.float32, device=self.device)
         actions_t = torch.as_tensor(actions, dtype=torch.int64, device=self.device).unsqueeze(1)
-        targets = self._compute_pessimistic_td_targets(rewards, beliefs, dones)
+        targets = self._compute_pessimistic_td_targets(
+            rewards, beliefs, dones, softmin_temp=softmin_temp
+        )
         q_sa = self.q_net(states_t).gather(1, actions_t).squeeze(1)
         loss = nn.functional.smooth_l1_loss(q_sa, targets)
+        if teacher is not None and distill_coef > 0:
+            with torch.no_grad():
+                teacher_q = teacher.q_net(states_t)
+            student_q = self.q_net(states_t)
+            loss = loss + distill_coef * nn.functional.mse_loss(student_q, teacher_q)
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
@@ -862,6 +926,7 @@ def evaluate_agent(
             if measure_time:
                 inference_times.append(time.perf_counter() - t0)
 
+            _note_belief_action(belief_provider, action)
             obs, reward, terminated, truncated, _ = env.step(action)
             if belief_provider is not None:
                 belief_provider.observe(obs)
@@ -917,6 +982,7 @@ def evaluate_shared_random_attack(
             if measure_time:
                 inference_times.append(time.perf_counter() - t0)
 
+            _note_belief_action(belief_provider, action)
             obs, reward, terminated, truncated, _ = env.step(action)
             if belief_provider is not None:
                 belief_provider.observe(obs)
@@ -984,6 +1050,7 @@ def _training_loop(
         else:
             action = agent.select_action(obs, epsilon)
 
+        _note_belief_action(belief_provider, action)
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
         if belief_provider is not None:
@@ -1040,8 +1107,18 @@ def _training_loop_pessimistic(
     solve_threshold: float = 475.0,
     collapse_floor: float = 400.0,
     belief_provider: Optional[BeliefProvider] = None,
+    clean_mix_prob: float = 0.0,
+    softmin_temp: float = 0.0,
+    teacher: Optional[DQNAgent] = None,
+    distill_coef: float = 0.0,
 ) -> Tuple[List[float], Dict]:
-    """Pessimistic fine-tune with mid-training eval, best-checkpoint restore, and early stop."""
+    """Pessimistic fine-tune with mid-training eval, best-checkpoint restore, and early stop.
+
+    Optional stabilizers (CartPole):
+    - clean_mix_prob: fraction of steps that use greedy-on-true + vanilla TD (keeps balancing)
+    - softmin_temp: softmin over particles in the TD target (0 = hard min)
+    - teacher + distill_coef: MSE pull toward a frozen vanilla Q
+    """
     set_seed(seed)
     env = CartPoleDefenderEnv()
     episode_returns: List[float] = []
@@ -1065,31 +1142,54 @@ def _training_loop_pessimistic(
         epsilon = cfg.epsilon_end + (cfg.epsilon_start - cfg.epsilon_end) * math.exp(
             -step / cfg.epsilon_decay_steps
         )
-        s_tilde = agent.worst_case_perturbation(obs, cfg.attack_epsilon)
-        explore = np.random.random() < epsilon
-        action = (
-            np.random.randint(agent.n_actions)
-            if explore
-            else agent.maximin_action(
-                s_tilde, cfg.attack_epsilon, cfg.belief_kappa, belief_provider=belief_provider
-            )
-        )
+        use_clean = clean_mix_prob > 0 and (np.random.random() < clean_mix_prob)
 
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        if belief_provider is not None:
-            next_belief = belief_provider.observe(next_obs)
+        if use_clean:
+            action = (
+                np.random.randint(agent.n_actions)
+                if np.random.random() < epsilon
+                else agent.greedy_action(obs)
+            )
+            _note_belief_action(belief_provider, action)
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            agent.replay_buffer.push(obs, action, reward, next_obs, done)
+            # Also store a singleton-style belief so pessimistic buffer stays warm.
+            if belief_provider is not None:
+                next_belief = belief_provider.observe(next_obs)
+            else:
+                next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
+            agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
         else:
-            next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
-        agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
-        agent.replay_buffer.push(obs, action, reward, next_obs, done)
+            s_tilde = agent.worst_case_perturbation(obs, cfg.attack_epsilon)
+            explore = np.random.random() < epsilon
+            action = (
+                np.random.randint(agent.n_actions)
+                if explore
+                else agent.maximin_action(
+                    s_tilde, cfg.attack_epsilon, cfg.belief_kappa, belief_provider=belief_provider
+                )
+            )
+            _note_belief_action(belief_provider, action)
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            if belief_provider is not None:
+                next_belief = belief_provider.observe(next_obs)
+            else:
+                next_belief = sample_ball(next_obs, cfg.attack_epsilon, cfg.belief_kappa)
+            agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
+            agent.replay_buffer.push(obs, action, reward, next_obs, done)
 
         obs = next_obs
         ep_return += reward
         agent.total_steps = step
 
         if step % cfg.train_freq == 0:
-            agent.train_step_pessimistic()
+            if use_clean:
+                agent.train_step()
+            agent.train_step_pessimistic(
+                softmin_temp=softmin_temp, teacher=teacher, distill_coef=distill_coef
+            )
 
         if done:
             episode_returns.append(ep_return)
@@ -1110,24 +1210,33 @@ def _training_loop_pessimistic(
 
         if step % eval_interval == 0:
             greedy_mean = quick_eval_mean(agent, eval_episodes, eval_seed_base + step, "vanilla")
-            maximin_mean = quick_eval_mean(agent, eval_episodes, eval_seed_base + step + 1, "pessimistic")
+            maximin_mean = float(np.mean(
+                evaluate_agent(
+                    agent,
+                    eval_episodes,
+                    eval_seed_base + step + 1,
+                    "pessimistic",
+                    measure_time=False,
+                    belief_provider=belief_provider,
+                )[0]
+            ))
             print(
                 f"  [eval @ {step}] greedy_clean={greedy_mean:.1f}  maximin_clean={maximin_mean:.1f}",
                 flush=True,
             )
-            if greedy_mean >= meta["best_greedy_eval"]:
-                meta["best_greedy_eval"] = greedy_mean
+            if maximin_mean >= meta["best_maximin_eval"]:
                 meta["best_maximin_eval"] = maximin_mean
+                meta["best_greedy_eval"] = greedy_mean
                 meta["best_step"] = step
                 best_snap = agent.snapshot_weights()
 
-            if early_stop and best_snap is not None and meta["best_greedy_eval"] >= solve_threshold:
-                collapsed = greedy_mean < collapse_floor
-                sharp_drop = greedy_mean < meta["best_greedy_eval"] - 75.0
+            if early_stop and best_snap is not None and meta["best_maximin_eval"] >= solve_threshold:
+                collapsed = maximin_mean < collapse_floor
+                sharp_drop = maximin_mean < meta["best_maximin_eval"] - 75.0
                 if collapsed or sharp_drop:
                     print(
-                        f"  [early stop @ {step}] greedy={greedy_mean:.1f} "
-                        f"(best={meta['best_greedy_eval']:.1f} @ step {meta['best_step']})",
+                        f"  [early stop @ {step}] maximin={maximin_mean:.1f} "
+                        f"(best={meta['best_maximin_eval']:.1f} @ step {meta['best_step']})",
                         flush=True,
                     )
                     meta["stopped_step"] = step
@@ -1139,7 +1248,7 @@ def _training_loop_pessimistic(
         agent.restore_weights(best_snap)
         print(
             f"  restored best checkpoint from step {meta['best_step']} "
-            f"(greedy={meta['best_greedy_eval']:.1f}, maximin={meta['best_maximin_eval']:.1f})",
+            f"(maximin={meta['best_maximin_eval']:.1f}, greedy={meta['best_greedy_eval']:.1f})",
             flush=True,
         )
     else:
@@ -1155,6 +1264,10 @@ def train_pessimistic_dqn(
     eval_episodes: int = 20,
     early_stop: bool = True,
     belief_provider: Optional[BeliefProvider] = None,
+    clean_mix_prob: float = 0.0,
+    softmin_temp: float = 0.0,
+    teacher: Optional[DQNAgent] = None,
+    distill_coef: float = 0.0,
 ) -> Tuple[List[float], Dict]:
     """**Algorithm 1 + 2:** Fine-tune DQN with pessimistic targets (Eq. 2.6)."""
     return _training_loop_pessimistic(
@@ -1165,6 +1278,10 @@ def train_pessimistic_dqn(
         eval_episodes=eval_episodes,
         early_stop=early_stop,
         belief_provider=belief_provider,
+        clean_mix_prob=clean_mix_prob,
+        softmin_temp=softmin_temp,
+        teacher=teacher,
+        distill_coef=distill_coef,
     )
 
 
@@ -1176,6 +1293,312 @@ def train_offpolicy_greedy_dqn(
 ) -> List[float]:
     """**Eq. 5.1–5.2:** Pessimistic behavior, greedy bootstrap target."""
     return _training_loop(agent, total_timesteps, seed, mode="offpolicy", belief_provider=belief_provider)
+
+
+def _quick_clean_maximin_mean(
+    agent: DQNAgent,
+    belief_provider: BeliefProvider,
+    n_episodes: int,
+    seed: int,
+) -> float:
+    """Maximin on the unperturbed observation (no PGD wrapper)."""
+    set_seed(seed)
+    env = CartPoleDefenderEnv()
+    rets: List[float] = []
+    eps = agent.config.attack_epsilon
+    kappa = agent.config.belief_kappa
+    for ep in range(n_episodes):
+        obs, _ = env.reset(seed=seed + ep)
+        belief_provider.reset_episode()
+        done, ret = False, 0.0
+        while not done:
+            action = agent.maximin_action(obs, eps, kappa, belief_provider=belief_provider)
+            _note_belief_action(belief_provider, action)
+            obs, r, term, trunc, _ = env.step(action)
+            ret += r
+            done = term or trunc
+        rets.append(ret)
+    env.close()
+    return float(np.mean(rets))
+
+
+def train_pessimistic_sound_dqn(
+    agent: DQNAgent,
+    belief_provider: SoundFilteredBelief,
+    total_timesteps: int = 40_000,
+    seed: int = 0,
+    eval_interval: int = 5_000,
+    eval_episodes: int = 15,
+    early_stop: bool = True,
+    solve_threshold: float = 475.0,
+    collapse_floor: float = 400.0,
+    assert_coverage: bool = True,
+) -> Tuple[List[float], Dict]:
+    """Pessimistic fine-tune with sound filter-then-propagate box + lattice hard-min.
+
+    Mirrors continuous GridWorld: maximin behavior over a lattice on the filtered
+    box, and maximin TD over a lattice on the *propagated* next box ``T(M_t, a)``.
+    Logs true-state coverage every episode and optionally asserts 100%.
+
+    Checkpoint selection uses the *deployed* rule (maximin over the sound box) on
+    clean episodes, including step-0 (frozen vanilla weights) as a candidate.
+    Restores the best such checkpoint. Early-stops if deployed-clean drops below
+    ``collapse_floor`` after having reached ``solve_threshold``.
+    """
+    assert _is_sound_filter(belief_provider)
+    set_seed(seed)
+    env = CartPoleDefenderEnv()
+    episode_returns: List[float] = []
+    ep_return = 0.0
+    episode_count = 0
+    obs, _ = env.reset(seed=seed)
+    belief_provider.reset_episode()
+    cfg = agent.config
+    lattice_m = getattr(belief_provider, "lattice_m", 2)
+
+    meta: Dict = {
+        "stopped_step": total_timesteps,
+        "best_greedy_eval": -1.0,
+        "best_maximin_eval": -1.0,
+        "best_step": 0,
+        "early_stopped": False,
+        "coverage_min": 1.0,
+        "coverage_episodes": 0,
+        "deployed_clean_curve": [],  # (step, maximin_clean, greedy_clean)
+        "step0_selected": False,
+    }
+    best_snap: Optional[dict] = None
+    ep_hits = 0
+    ep_tot = 0
+
+    def _eval_and_maybe_save(step: int) -> Tuple[float, float]:
+        nonlocal best_snap
+        greedy_mean = quick_eval_mean(agent, eval_episodes, 9000 + step, "vanilla")
+        eval_bp = SoundFilteredBelief(
+            cfg.attack_epsilon,
+            cfg.belief_kappa,
+            lattice_m=lattice_m,
+        )
+        maximin_mean = _quick_clean_maximin_mean(agent, eval_bp, eval_episodes, 9100 + step)
+        print(
+            f"  [eval @ {step}] greedy_clean={greedy_mean:.1f}  "
+            f"deployed_maximin_clean={maximin_mean:.1f}",
+            flush=True,
+        )
+        meta["deployed_clean_curve"].append(
+            {"step": step, "maximin_clean": maximin_mean, "greedy_clean": greedy_mean}
+        )
+        if maximin_mean >= meta["best_maximin_eval"]:
+            meta["best_maximin_eval"] = maximin_mean
+            meta["best_greedy_eval"] = greedy_mean
+            meta["best_step"] = step
+            best_snap = agent.snapshot_weights()
+        return greedy_mean, maximin_mean
+
+    # Step-0 candidate: frozen vanilla weights under the deployed maximin rule.
+    _eval_and_maybe_save(0)
+
+    for step in range(1, total_timesteps + 1):
+        epsilon = cfg.epsilon_end + (cfg.epsilon_start - cfg.epsilon_end) * math.exp(
+            -step / cfg.epsilon_decay_steps
+        )
+        true_raw = env.get_true_state().astype(np.float64)
+        s_tilde = agent.worst_case_perturbation(obs, cfg.attack_epsilon)
+
+        # Always update the filter before acting (including explore), like GW.
+        particles = belief_provider.particles_at(s_tilde)
+        ep_tot += 1
+        ep_hits += int(contains(belief_provider, true_raw))
+
+        explore = np.random.random() < epsilon
+        action = (
+            np.random.randint(agent.n_actions)
+            if explore
+            else agent.maximin_action(
+                s_tilde,
+                cfg.attack_epsilon,
+                cfg.belief_kappa,
+                particles=particles,
+                belief_provider=belief_provider,
+            )
+        )
+        next_belief = belief_provider.propagated_lattice(action)
+        _note_belief_action(belief_provider, action)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+
+        agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
+        agent.replay_buffer.push(obs, action, reward, next_obs, done)
+
+        obs = next_obs
+        ep_return += reward
+        agent.total_steps = step
+
+        if step % cfg.train_freq == 0:
+            agent.train_step_pessimistic(softmin_temp=0.0)
+
+        if done:
+            cov = ep_hits / max(ep_tot, 1)
+            meta["coverage_min"] = min(meta["coverage_min"], cov)
+            meta["coverage_episodes"] += 1
+            if assert_coverage and cov < 1.0 - 1e-12:
+                env.close()
+                raise AssertionError(
+                    f"sound coverage {cov:.6f} < 1.0 at episode {episode_count} "
+                    f"(hits={ep_hits}/{ep_tot})"
+                )
+            if episode_count % 20 == 0:
+                print(
+                    f"  [cover ep {episode_count}] true-state coverage={cov:.3f} "
+                    f"ret={ep_return:.0f} empty={belief_provider.n_empty}",
+                    flush=True,
+                )
+            episode_returns.append(ep_return)
+            episode_count += 1
+            if episode_count % cfg.target_update_episodes == 0:
+                agent.update_target()
+            obs, _ = env.reset()
+            belief_provider.reset_episode()
+            ep_return = 0.0
+            ep_hits = 0
+            ep_tot = 0
+
+        if step % 25_000 == 0 and episode_returns:
+            recent = episode_returns[-100:]
+            print(
+                f"  step {step:>7}/{total_timesteps} | mean_return(last {len(recent)})={np.mean(recent):.1f}",
+                flush=True,
+            )
+
+        if step % eval_interval == 0:
+            _, maximin_mean = _eval_and_maybe_save(step)
+            if early_stop and meta["best_maximin_eval"] >= solve_threshold:
+                collapsed = maximin_mean < collapse_floor
+                if collapsed:
+                    print(
+                        f"  [early stop @ {step}] deployed_maximin={maximin_mean:.1f} "
+                        f"< {collapse_floor} after best={meta['best_maximin_eval']:.1f} "
+                        f"@ step {meta['best_step']}",
+                        flush=True,
+                    )
+                    meta["stopped_step"] = step
+                    meta["early_stopped"] = True
+                    break
+
+    env.close()
+    if best_snap is not None:
+        agent.restore_weights(best_snap)
+        meta["step0_selected"] = meta["best_step"] == 0
+        flag = "  *** STEP-0 SELECTED (FT did not beat frozen weights) ***" if meta["step0_selected"] else ""
+        print(
+            f"  restored best checkpoint from step {meta['best_step']} "
+            f"(deployed_maximin={meta['best_maximin_eval']:.1f}, "
+            f"greedy={meta['best_greedy_eval']:.1f}){flag}",
+            flush=True,
+        )
+    else:
+        agent.update_target()
+    return episode_returns, meta
+
+
+def train_pbgt_sound_dqn(
+    agent: DQNAgent,
+    belief_provider: SoundFilteredBelief,
+    total_timesteps: int = 40_000,
+    seed: int = 0,
+    assert_coverage: bool = True,
+) -> Tuple[List[float], Dict]:
+    """PB-GT fine-tune: sound-box maximin behavior, greedy Double-DQN target.
+
+    Test-time policy is greedy (caller evaluates mode=\"vanilla\"). Coverage is
+    logged every episode and asserted at 100% when ``assert_coverage``.
+    """
+    assert _is_sound_filter(belief_provider)
+    set_seed(seed)
+    env = CartPoleDefenderEnv()
+    episode_returns: List[float] = []
+    ep_return = 0.0
+    episode_count = 0
+    obs, _ = env.reset(seed=seed)
+    belief_provider.reset_episode()
+    cfg = agent.config
+    meta: Dict = {"coverage_min": 1.0, "coverage_episodes": 0}
+    ep_hits = 0
+    ep_tot = 0
+
+    for step in range(1, total_timesteps + 1):
+        epsilon = cfg.epsilon_end + (cfg.epsilon_start - cfg.epsilon_end) * math.exp(
+            -step / cfg.epsilon_decay_steps
+        )
+        true_raw = env.get_true_state().astype(np.float64)
+        s_tilde = agent.worst_case_perturbation(obs, cfg.attack_epsilon)
+        particles = belief_provider.particles_at(s_tilde)
+        ep_tot += 1
+        ep_hits += int(contains(belief_provider, true_raw))
+
+        explore = np.random.random() < epsilon
+        action = (
+            np.random.randint(agent.n_actions)
+            if explore
+            else agent.maximin_action(
+                s_tilde,
+                cfg.attack_epsilon,
+                cfg.belief_kappa,
+                particles=particles,
+                belief_provider=belief_provider,
+            )
+        )
+        # PB-GT target uses true next state; still note_action for filter continuity.
+        _note_belief_action(belief_provider, action)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        # Buffer still stores a belief slot; TD ignores it (greedy on true s').
+        next_belief = belief_provider.propagated_lattice(action)
+        agent.belief_replay_buffer.push(obs, action, reward, next_obs, done, next_belief)
+
+        obs = next_obs
+        ep_return += reward
+        agent.total_steps = step
+
+        if step % cfg.train_freq == 0:
+            agent.train_step_offpolicy_greedy()
+
+        if done:
+            cov = ep_hits / max(ep_tot, 1)
+            meta["coverage_min"] = min(meta["coverage_min"], cov)
+            meta["coverage_episodes"] += 1
+            if assert_coverage and cov < 1.0 - 1e-12:
+                env.close()
+                raise AssertionError(
+                    f"PB-GT sound coverage {cov:.6f} < 1.0 at episode {episode_count} "
+                    f"(hits={ep_hits}/{ep_tot})"
+                )
+            if episode_count % 20 == 0:
+                print(
+                    f"  [cover ep {episode_count}] true-state coverage={cov:.3f} "
+                    f"ret={ep_return:.0f}",
+                    flush=True,
+                )
+            episode_returns.append(ep_return)
+            episode_count += 1
+            if episode_count % cfg.target_update_episodes == 0:
+                agent.update_target()
+            obs, _ = env.reset()
+            belief_provider.reset_episode()
+            ep_return = 0.0
+            ep_hits = 0
+            ep_tot = 0
+
+        if step % 25_000 == 0 and episode_returns:
+            recent = episode_returns[-100:]
+            print(
+                f"  step {step:>7}/{total_timesteps} | mean_return(last {len(recent)})={np.mean(recent):.1f}",
+                flush=True,
+            )
+
+    env.close()
+    agent.update_target()
+    return episode_returns, meta
 
 
 def train_cartpole_attacker(
@@ -1456,6 +1879,7 @@ def evaluate_pgd_worst_case(
                 )
             else:
                 action = agent.greedy_action(s_tilde)
+            _note_belief_action(belief_provider, action)
             obs, reward, terminated, truncated, _ = env.step(action)
             if belief_provider is not None:
                 belief_provider.observe(obs)
@@ -1504,6 +1928,9 @@ def _make_eval_belief_provider(
 ) -> Optional[BeliefProvider]:
     if belief_mode == "uniform":
         return UniformBallBelief(epsilon, kappa)
+    if belief_mode == "sound":
+        # Filter-then-propagate box belief (Eq. 3.2-3.3), sound by construction.
+        return SoundFilteredBelief(epsilon, kappa)
     if belief_model is not None:
         return make_belief_provider("learned", epsilon, kappa, belief_model)
     return None
@@ -1574,6 +2001,7 @@ CSV_FIELDNAMES = [
     "pessimistic_train_std",
     "pessimistic_finetune_stopped_step",
     "pessimistic_best_greedy_eval",
+    "pessimistic_best_maximin_eval",
     "pessimistic_early_stopped",
     "offpolicy_greedy_train_avg_reward",
     "offpolicy_greedy_train_std",
@@ -1712,15 +2140,23 @@ def run_single_experiment_with_seed(
     print(f"[Exp {experiment_num + 1}] Phase 2: Training pessimistic DQN (belief={belief_mode})...")
     pes = DQNAgent(config=vanilla.config)
     pes.clone_weights_from(vanilla)
-    pes.prepare_robust_finetune(freeze_backbone=True)
+    pes.prepare_robust_finetune(lr=2e-5, freeze_backbone=False)
     pes_train, pes_meta = train_pessimistic_dqn(
-        pes, finetune_pessimistic, seed + 2000, belief_provider=train_belief
+        pes,
+        finetune_pessimistic,
+        seed + 2000,
+        belief_provider=train_belief,
+        clean_mix_prob=0.4,
+        softmin_temp=0.1,
+        teacher=vanilla,
+        distill_coef=0.1,
     )
     pes.save(paths["pessimistic"])
     results["pessimistic_train_avg_reward"] = float(np.mean(pes_train[-100:])) if pes_train else np.nan
     results["pessimistic_train_std"] = float(np.std(pes_train[-100:])) if pes_train else np.nan
     results["pessimistic_finetune_stopped_step"] = pes_meta["stopped_step"]
     results["pessimistic_best_greedy_eval"] = pes_meta["best_greedy_eval"]
+    results["pessimistic_best_maximin_eval"] = pes_meta["best_maximin_eval"]
     results["pessimistic_early_stopped"] = int(pes_meta["early_stopped"])
 
     p_clean, p_clean_ms = evaluate_agent(
@@ -2294,7 +2730,7 @@ if __name__ == "__main__":
         "--belief",
         type=str,
         default="learned",
-        choices=["learned", "uniform"],
+        choices=["learned", "uniform", "sound"],
         help="Belief model for pessimistic/off-policy (step 7)",
     )
     parser.add_argument("--belief-pretrain", type=int, default=30_000, help="Belief RNN pretrain steps")

@@ -94,7 +94,7 @@ class GridWorld(gym.Env):
 
     def seed(self, seed=None):
         """Set random seed for reproducibility."""
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
     def step(self, action):
@@ -262,7 +262,7 @@ class GridWorld_RL_Attack(gym.Env):
 
     def seed(self, seed=None):
         """Set random seed for reproducibility."""
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
     def step(self, action):
@@ -484,9 +484,11 @@ class Q_Agent():
             (1 - alpha) * current_q_value + alpha * (reward + self.gamma * max_q_value)
     
     def find_maxmin_with_belief(self, q_table_true, q_table_withatt, next_state, policy, new_policy, belief):
-        """**Eq. 2.6:** (T_{car}Q)(s,a) target = γ · max_{a′} min_{m ∈ M∩B_ε(s′)} Q(s′,a′)
+        """**Eq. 2.6:** (T_{car}Q)(s,a) target = γ · max_{a′} min_{m ∈ M∩B_ε(s′)} Q(m,a′)
 
         Pessimistic Bellman target (Algorithm 4, Line 13; BP-DQN loss, tabular form).
+        Intersects the propagated belief with B_ε(s′) for the *true* next state s′,
+        then takes max_a' min_m Q(m, a') over that set.
         """
         states = self.get_ball(next_state)
         possible_states = states_intersection(belief, states)
@@ -520,16 +522,18 @@ class Q_Agent():
         """**Eq. 2.2 / Algorithm 1, Line 6:** ω_π(s) = argmin_{s̃∈B_ε(s)} Q(s, π(s̃))
 
         Worst-case perturbed state for pessimistic training.
+        Scores each candidate observation by the true-state value of the
+        action the current policy would take under that observation.
         """
         states = self.get_ball(true_state)
         values = dict()
         for i in states:
-            values[i] = self.q_table_withatt[i][policy[i]]
+            values[i] = self.q_table_withatt[true_state][policy[i]]
         att_state = min(values, key = values.get)
         return att_state
 
     def pareto_update(self, policy):
-        """**Eq. 2.1 (iterative):** π(s) = argmax_a mean_{s̄∈B_ε(s)} Q(s̄,a) until convergence
+        """**Eq. 2.1 (iterative):** π(s) = argmax_a min_{s̄∈B_ε(s)} Q(s̄,a) until convergence
 
         Fixed-point policy initialization before pessimistic training.
         """
@@ -545,7 +549,7 @@ class Q_Agent():
                     q_values = []
                     for i in states:
                         q_values.append(self.q_table_withatt[i][action])
-                    values[action] = np.mean(q_values)
+                    values[action] = min(q_values)
                 value_min[state] = values
 
             for state in self.all_state:
@@ -559,9 +563,9 @@ class Q_Agent():
         return policy
 
     def get_policy(self, init = False):
-        """**Eq. 2.1 / Algorithm 1, Line 5:** π(s̃) = argmax_a mean_{s̄∈B_ε(s̃)} Q(s̄,a)
+        """**Eq. 2.1 / Algorithm 1, Line 5:** π(s̃) = argmax_a min_{s̄∈B_ε(s̃)} Q(s̄,a)
 
-        Tabular maximin policy (mean approximation over ε-ball).
+        Tabular maximin policy over the ε-ball.
         """
         policy = dict()
         if init:
@@ -575,7 +579,7 @@ class Q_Agent():
                     tmp = []
                     for true_state in states:
                         tmp.append(self.q_table_withatt[true_state][action])
-                    values[action] = np.mean(tmp)
+                    values[action] = min(tmp)
                 policy[state] = max(values, key = values.get)
         return policy
 
@@ -588,8 +592,6 @@ class Q_Agent():
 
     def get_policy_with_belief(self, policy, belief):
         """**Eq. 3.4 / Algorithm 5, Line 7:** π(s̃) = argmax_a min_{m∈M_t∩B_ε(s̃)} Q(m,a)
-
-        Code uses mean over M∩B when |M∩B|>1 (tabular approximation).
         """
         new_policy = dict()
         value_min = dict()
@@ -603,7 +605,7 @@ class Q_Agent():
                     q_values = []
                     for i in possible_states:
                         q_values.append(self.q_table_withatt[i][action])
-                    values[action] = np.mean(q_values)
+                    values[action] = min(q_values)
                 value_min[state] = values
             elif len(possible_states) == 1:
                 value_min[state] = self.q_table_withatt[list(possible_states)[0]]

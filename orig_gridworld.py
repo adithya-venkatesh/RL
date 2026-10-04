@@ -60,7 +60,7 @@ class GridWorld(gym.Env):
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
     def model_dynamics(self, state, action):
@@ -221,7 +221,7 @@ class GridWorld_RL_Attack(gym.Env):
         return self.grid[ new_location[0], new_location[1]]
 
     def seed(self, seed=None):
-        if seed:
+        if seed is not None:
             np.random.seed(seed)
 
 

@@ -1,11 +1,99 @@
+# Python
 __pycache__/
 *.py[cod]
-checkpoints/
-logs/
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env/
+.mplconfig/
+
+# Model checkpoints and SB3 attacker weights
 *.pt
+*.pth
 *.zip
+checkpoints/
+RL_attack/
+gw_prod_attackers_*/
+gw_swap_attackers_*/
+gw_regen_ckpts_*/
+**/attacker*.zip
+
+# Common large artifacts (and anything typically >>50 MB)
+*.tfevents.*
+events.out.tfevents.*
+*.h5
+*.hdf5
+*.npy
+*.npz
 *.pkl
-token*
+*.pickle
+*.tar
+*.tar.gz
+*.gz
+*.7z
+*.rar
+*.mp4
+*.avi
+*.wav
+*.bin
+*.onnx
+*.safetensors
+arxiv_v1/.bin/
+arxiv_v1/.bin/**
+
+# Experiment logs (not paper CSVs)
+logs/
+*.log
+
+# LaTeX build intermediates (keep sources, figures PDF, build script)
+*.aux
+*.out
+*.toc
+*.lof
+*.lot
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.bcf
+*.run.xml
+*.xdv
+*.dvi
+
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+credentials*
+*credentials*
+*.pem
+*.key
+secrets/
+**/api_keys*
+*secret*
+*token.json
+.token*
+
+# OS / editor
+.DS_Store
+.cursor/
+.idea/
+.vscode/
+
+# Generated figure rasters (commit PDFs under arxiv_v1/figures/)
 *.png
-*.csv
-!cartpole_experiments*.csv
+!arxiv_v1/figures/*.pdf
+
+# Do not ignore paper deliverables
+!arxiv_v1/main.tex
+!arxiv_v1/build_figures.py
+!arxiv_v1/figures/
+!arxiv_v1/figures/*.pdf
+
+# Local superseded artifacts (do not commit)
+old_results/

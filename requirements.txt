@@ -1,6 +1,8 @@
-math
-random
-numpy
-gymnasium
-torch
-stable_baselines3
+# Detected from the local environment used for the paper runs
+# Python 3.9.13
+torch==2.8.0
+gymnasium==1.1.1
+stable-baselines3==2.7.0
+numpy==2.0.2
+matplotlib==3.9.4
+pandas==2.3.2

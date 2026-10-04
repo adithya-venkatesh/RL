@@ -1,3 +1,4 @@
+\pdfoutput=1
 \documentclass[10pt,twocolumn]{article}
 
 \usepackage[letterpaper,top=0.85in,bottom=0.9in,left=0.7in,right=0.7in]{geometry}
@@ -15,17 +16,17 @@
 \SetKwInput{KwIn}{Input}
 \SetKwInput{KwOut}{Output}
 
-\hypersetup{colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black}
+\hypersetup{pdftitle={Pessimistic-Behavior / Greedy-Target Q-Learning against Adversarial State Perturbations},pdfauthor={Adithya Venkatesh, Zizhan Zheng},colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black}
 \captionsetup{font=small,labelfont=bf,skip=4pt}
 \setlist[itemize]{leftmargin=1.1em,itemsep=2pt,topsep=3pt}
 \setlist[enumerate]{leftmargin=1.3em,itemsep=2pt,topsep=3pt}
+\emergencystretch=2em
 
 \title{\vspace{-1.2em}Pessimistic-Behavior / Greedy-Target Q-Learning\\against Adversarial State Perturbations\vspace{-0.4em}}
-\author{
-Adithya Venkatesh$^{1}$ \quad Zizhan Zheng$^{2}$\\[4pt]
-{\small $^{1}$Independent researcher \quad $^{2}$Department of Computer Science, Tulane University}\\
-{\small \texttt{zzheng3@tulane.edu}}
-\vspace{-0.6em}
+\author{%
+Adithya Venkatesh\\[0.55em]
+Zizhan Zheng\\
+{\small Department of Computer Science, Tulane University}%
 }
 \date{}
 
@@ -34,163 +35,330 @@ Adithya Venkatesh$^{1}$ \quad Zizhan Zheng$^{2}$\\[4pt]
 \thispagestyle{empty}
 
 \begin{abstract}
-A well-trained RL agent can be defeated by strategically perturbing its state observations at test time.
-Sun \& Zheng (ICLR 2024) address this threat with \emph{belief-enriched pessimistic Q-learning}: the agent chooses a maximin action over a belief about possible true states, both when collecting data and when forming Bellman targets.
-The resulting defense is strong in discrete domains but incurs substantial test-time cost, because every decision requires a maximin search over the belief.
-We study a deliberately cheaper variant, \textbf{Pessimistic-Behavior / Greedy-Target} (PB-GT) Q-learning: training still uses pessimistic (maximin) \emph{behavior} under perturbed observations, but the \emph{target} is ordinary greedy Q-learning on the true next state, and test-time actions are greedy on the observed state---no belief, no maximin.
-On a tabular $5{\times}5$ GridWorld with $500$ random seeds, full pessimistic Q-learning remains far more robust under trained DQN attackers ($-21.8{\pm}50.0$ vs.\ $-552.4{\pm}335.2$ for PB-GT and $-682.1{\pm}329.0$ for vanilla), while PB-GT matches vanilla inference speed and is ${\approx}11.6{\times}$ faster than maximin.
-A Double-DQN port to CartPole-v1 ($5$ seeds) is reported as a preliminary deep-RL check: vanilla converges reliably after checkpoint restore, but our BP-style pessimistic and PB-GT agents do \emph{not} reproduce the GridWorld robustness ordering.
-We therefore present PB-GT as a fast approximation with a documented robustness gap, not as a substitute for BP-DQN.
+Belief-enriched pessimistic Q-learning acts by a maximin over states consistent with history.
+We ask whether its robustness to an attacker who changes only the observation lives in the learned $Q$-function or in that maximin.
+On a tabular $5{\times}5$ grid with $500$ seeds, switching from greedy to maximin wins on $89.6\%$ and $76.4\%$ of seeds for the pessimistic and PB-GT $Q$-tables under the worst of twenty-one learned attackers plus no attack.
+The backup adds protection on most seeds against the stronger attackers ($79.0\%$ belief-aware matched, $65.4\%$ worst case), a smaller gain than the test-rule switch.
+PB-GT performs about like vanilla under attack.
+On a continuous lift of the grid, box maximin beats vanilla on $10$ of $10$ seeds on both matched attacks, and a five-seed swap finds no measurable gain from the backup.
+On CartPole, the trained sound box beats vanilla on $3$ of $5$ seeds under random noise and a random search, the same box on frozen weights holds at $500$, and PB-GT is below vanilla.
+Maximin costs about $6.8$, $2.3$, and $34$ times a greedy lookup on the three domains.
+With no attacker the tabular maximin mean is about $-687$ because the belief stays a few cells wide.
+A natural next step is to call maximin only when the belief is still large.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-Reinforcement learning (RL) agents that act on learned value or policy networks are brittle under \emph{adversarial state perturbations}: a test-time attacker, subject to a budget $\varepsilon$, replaces the true state $s$ by a nearby observation $\tilde s\in B_\varepsilon(s)$ so as to minimize the agent's return~\citep{huang2017adversarial,zhang2020robust}.
-The attacker does not change the underlying transition dynamics; it only poisons what the agent sees.
-This threat model is now standard, and several defenses exist.
-Regularization methods such as SA-MDP / SA-DQN~\citep{zhang2020robust} and WocaR-RL~\citep{liang2022wocar} encourage smoothness of $\pi(\cdot\mid s)$ across $B_\varepsilon(s)$.
-Alternating-training methods such as ATLA~\citep{zhang2021robust} treat the attacker as an RL agent and co-train it with the defender, which can be more robust but is computationally expensive.
+Reinforcement learning agents that act by maximizing a learned value function are brittle when the observation can be nudged and the environment cannot.
+Under \emph{adversarial state perturbations}, a test-time attacker, kept inside a budget $\varepsilon$, replaces the true state $s$ with a nearby observation $\tilde s\in B_\varepsilon(s)$ chosen to reduce return~\cite{huang2017adversarial,zhang2020robust}.
+The transition kernel and the reward stay as they are.
+The environment still moves from the true state.
+Only the input the agent sees is changed.
+A value function that is accurate on clean states gives no promise about the $\arg\max$ it induces on a nearby input, and a small budget-respecting change can flip the greedy action at the states where the action matters.
 
-\citet{sun2024belief} take a different route.
-They view robust RL under state attacks as a Stackelberg Markov game with asymmetric observations and propose \emph{pessimistic Q-learning}: given $\tilde s$, the agent selects
+Regularization methods such as SA-MDP / SA-DQN~\cite{zhang2020robust} and WocaR-RL~\cite{liang2022wocar} penalize policies that change their action inside $B_\varepsilon(s)$.
+They stay cheap at test time, because the deployed policy is still one forward pass.
+Alternating-training methods such as ATLA~\cite{zhang2021robust} treat the attacker as an RL agent and train it against the defender.
+Sun and Zheng~\cite{sun2024belief} take a third route.
+They treat the problem as a Stackelberg Markov game in which the attacker sees the true state and the defender does not, and they propose \emph{belief-enriched pessimistic Q-learning}.
+Given an observation, the agent acts by
 \begin{equation}
-\pi(\tilde s)=\arg\max_{a\in\mathcal{A}}\min_{\bar s\in B_\varepsilon(\tilde s)} Q(\bar s,a).
+\pi(\tilde s)=\arg\max_{a\in\mathcal{A}}\;\min_{\bar s\in B_\varepsilon(\tilde s)} Q(\bar s,a).
 \label{eq:maximin}
 \end{equation}
-The same maximin principle is used in the Bellman target, so training and testing are consistent.
-They further shrink uncertainty with a belief $M_t\subseteq B_\varepsilon(\tilde s_t)$ updated from history (tabular case) or a particle-filter RNN (deep case: BP-DQN), and with diffusion purification for pixel observations (DP-DQN).
-Empirically, BP-DQN and DP-DQN obtain strong robustness on continuous GridWorld and Atari.
+The inner $\min$ is a hard worst case over states that could have produced the observation.
+The same maximin operator is used in the Bellman target, so the values being learned are the values of the policy that will be deployed.
+A belief $M_t\subseteq B_\varepsilon(\tilde s_t)$, propagated from the interaction history, shrinks the set before the min is taken.
+In the tabular case that update is exact.
+In their deep method BP-DQN it is approximated by a particle-filter RNN, and for pixels DP-DQN purifies the input with a diffusion model.
 
-Maximin-over-belief inference is the source of that robustness---and of its cost.
-In our tabular GridWorld implementation, belief-restricted maximin is about $11{\times}$ slower per step than greedy $Q$-argmax; in a CartPole Double-DQN port the gap is about $50{\times}$.
-Many settings need \emph{low-latency} decisions under moderate observation noise, not a full worst-case search at every tick.
-This paper asks a narrow question that is complementary to~\citet{sun2024belief}:
-
+Each decision then needs a belief update and a maximin over the surviving states.
+A vanilla agent needs one $\arg\max$ over $|\mathcal{A}|$ values.
+The question that follows from that cost is the one this paper studies.
 \begin{quote}
-\emph{If we keep pessimistic \textbf{behavior} while collecting data, but revert to vanilla greedy \textbf{targets} and greedy \textbf{test} actions, how much robustness do we retain, and how much inference cost do we save?}
+\emph{Is the robustness of belief-enriched pessimistic Q-learning a property of the learned $Q$-function, or a property of the test-time maximin?}
 \end{quote}
+If pessimistic rollouts already make $Q$ robust, one could train pessimistically and deploy greedily.
+If the robustness is produced when the maximin is evaluated, adversarial data collection will not replace it.
 
-We call the resulting algorithm \textbf{PB-GT} (Pessimistic-Behavior / Greedy-Target) Q-learning.
-It is \emph{not} ``off-policy DQN'': vanilla and pessimistic Q-learning are already off-policy in the classical sense.
-The distinctive design is the \emph{pairing} of maximin behavior with a non-pessimistic backup and a non-pessimistic test policy---a deliberate train/test mismatch, opposite to the consistency argument of~\citet{sun2024belief}.
-We evaluate it honestly, with the same three-way comparison throughout: vanilla Q / DQN, belief-enriched pessimistic Q / BP-style DQN, and PB-GT.
+The short answer is that the robustness is mostly in the test-time maximin.
+We separate the pieces with \textbf{PB-GT} (Pessimistic-Behavior / Greedy-Target) Q-learning, which keeps the adversarial observations, the belief, and the maximin behavior of~\cite{sun2024belief} while the agent is collecting data, then uses an ordinary greedy backup and a greedy test rule.
+On the tabular grid, switching the test rule from greedy to maximin wins on $89.6\%$ of seeds for the pessimistic $Q$-table and on $76.4\%$ for the PB-GT $Q$-table when each seed is judged by its worst of twenty-two conditions (twenty-one attackers plus no attack).
+On that grid the pessimistic backup adds protection on most seeds against the stronger attackers, and the gain is smaller than the test-rule gain.
+PB-GT performs about like vanilla under attack.
+On the continuous grid a five-seed swap shows no measurable further gain from the pessimistic backup.
+The frozen CartPole box holds under shared random noise and under a random search inside the budget.
+The cost of the search is about $6.8$ times a greedy tabular lookup, about $2.3$ times on the continuous grid, and about $34$ times on CartPole.
+On the tabular grid the deployed maximin rule is also weak on clean episodes, because the belief never collapses to the true cell.
 
 \paragraph{Contributions.}
 \begin{enumerate}[leftmargin=1.4em]
-\item \textbf{Tabular reproduction and scale.} We implement vanilla Q-learning and belief-enriched pessimistic Q-learning~\citep[Alg.~1--2]{sun2024belief} on a $5{\times}5$ GridWorld and run a $500$-seed comparison under fixed trained DQN attackers.
-\item \textbf{PB-GT.} We define and evaluate a cheaper variant that uses pessimistic behavior at train time but greedy Double-Q targets and greedy test actions.
-On GridWorld, PB-GT sits between vanilla and full pessimism under attack and matches vanilla inference speed.
-\item \textbf{Preliminary deep port.} We port all three methods to CartPole-v1 with Double DQN and a simplified GRU particle belief (BP-DQN-\emph{style}, not full PF-RNN BP-DQN). Results are mixed; we do not claim GridWorld-style robustness in this setting.
-\item \textbf{Scoped claim.} v1 documents a robustness--compute tradeoff. Closing the gap to BP-DQN while keeping PB-GT's speed, and comparing on continuous GridWorld / CAR-DQN / Atari, is left to future work.
+\item We implement vanilla Q-learning and belief-enriched pessimistic Q-learning, following Algorithms~1--2 of~\cite{sun2024belief}, on a $5{\times}5$ GridWorld, and we evaluate them over $500$ seeds together with the two swapped target/test cells.
+The backup in the tabular pessimistic agent is a hard minimum over the belief.
+\item We define PB-GT and evaluate it under the same protocol.
+In the tabular setting the PB-GT backup is ordinary greedy Q-learning.
+Double DQN is used only in the deep settings.
+\item By holding data collection fixed and swapping the target and the test rule, we ask how much of the robustness sits in the test-time maximin and how much sits in the pessimistic backup.
+\item On a continuous $2$-D lift of the same grid, and on CartPole-v1, we replace a learned particle filter with a sound set-membership box, and we report the same swap where the seed count allows it.
+\item Code, the final CSV files, and the figure script are listed in Appendix~\ref{app:code}.
 \end{enumerate}
 
-\section{Background}
+\section{Problem formulation}
 \label{sec:bg}
 
 \subsection{MDPs and Q-learning}
-An MDP is $\langle \mathcal{S},\mathcal{A},P,R,\gamma\rangle$.
-A (deterministic) policy $\pi:\mathcal{S}\to\mathcal{A}$ induces $Q^\pi(s,a)=R(s,a)+\gamma\sum_{s'}P(s'|s,a)\max_{a'}Q^\pi(s',a')$ at optimality.
-Vanilla Q-learning~\citep{watkins1992q} updates
+A Markov decision process (MDP) is a tuple $\langle \mathcal{S},\mathcal{A},P,R,\gamma\rangle$.
+The set $\mathcal{S}$ is the state space and $\mathcal{A}$ is a finite action space.
+The kernel $P(s'\mid s,a)$ is the probability of moving to $s'$ after action $a$ in state $s$.
+The function $R(s,a)$ is the immediate reward.
+The scalar $\gamma\in(0,1]$ is the discount factor.
+The tabular GridWorld in this paper is a finite MDP with $\gamma=1$.
+The continuous GridWorld and CartPole have continuous states, finite actions, and $\gamma<1$.
+
+At time $t$ the environment occupies a true state $s_t\in\mathcal{S}$.
+The agent selects $a_t\in\mathcal{A}$, receives $R(s_t,a_t)$, and the environment moves to $s_{t+1}\sim P(\cdot\mid s_t,a_t)$.
+A deterministic policy $\pi$ maps states, or observations, to actions.
+The optimal action-value function satisfies
 \begin{equation}
-Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\bigl(R+\gamma\max_{a'}Q(s',a')\bigr)
+Q^\star(s,a)=R(s,a)+\gamma\sum_{s'}P(s'\mid s,a)\max_{a'}Q^\star(s',a').
+\label{eq:bellman}
+\end{equation}
+When $Q^\star$ is known, the optimal policy is $\pi^\star(s)=\arg\max_a Q^\star(s,a)$.
+
+Vanilla Q-learning~\cite{watkins1992q} estimates $Q^\star$ from sampled transitions.
+After $(s,a,R,s')$ it applies
+\begin{equation}
+Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\bigl(R+\gamma\max_{a'}Q(s',a')\bigr),
 \label{eq:vanilla-q}
 \end{equation}
-from true-state transitions, with $\varepsilon$-greedy behavior on $s$.
-Deep Q-networks~\citep{mnih2015human} replace the table by $Q_\theta$, typically with Double DQN targets~\citep{van2016deep} and a replay buffer.
-At test time vanilla DQN acts greedily on whatever observation it receives.
+where $\alpha\in(0,1]$ is a learning rate.
+During data collection the agent is $\varepsilon$-greedy on the true state: with probability $1-\varepsilon$ it takes $\arg\max_a Q(s,a)$, and with probability $\varepsilon$ it takes a uniform random action.
+Deep Q-networks~\cite{mnih2015human} replace the table with a network $Q_\theta$ trained from a replay buffer.
+In the deep experiments we use the Double DQN target~\cite{van2016deep}, which takes the greedy action of the online network and scores it with the target network, so that the bootstrap does not use the same $\max$ that selected the action.
+The tabular experiments do not use Double DQN.
+In all of these methods the deployed policy is $\arg\max_a Q(\cdot,a)$ on whatever input the agent is handed.
 
-\subsection{State-adversarial attacks}
-Following~\citet{huang2017adversarial,zhang2020robust,sun2024belief}, a test-time attacker observes $s_t$ and produces $\tilde s_t\in B_\varepsilon(s_t)$ (an $\ell_p$ ball; in our tabular grid, the discrete $1$-step neighborhood).
-The agent acts on $\tilde s_t$; the environment transitions from the \emph{true} $s_t$.
-For a fixed defender $\pi$, the attacker problem is itself an MDP~\citep{zhang2021robust,sun2024belief} with reward $-R$, so a DQN can be trained to attack a frozen defender.
-We adopt the usual training assumption: the agent has access to an intact MDP and to $\varepsilon$ (or an estimate) while learning~\citep{zhang2020robust,sun2024belief}.
+\subsection{Adversarial state perturbations}
+\label{sec:threat}
 
-\subsection{Pessimistic Q-learning \citep{sun2024belief}}
-Given $\tilde s$, Algorithm~1 of~\citet{sun2024belief} sets the target/behavior policy to the maximin rule~\eqref{eq:maximin} and sets the attacker's best response to
+In the experiments the attacker is present during adversarial fine-tuning and at test time.
+The initial vanilla pretraining does not use an attacker.
+When the attacker is present, it changes only the observation.
+The environment still occupies $s_t$ and still transitions from $s_t$~\cite{huang2017adversarial,zhang2020robust,sun2024belief}.
+
+At step $t$ an attacker who sees $s_t$ produces
 \begin{equation}
-\omega_\pi(s)=\arg\min_{\tilde s\in B_\varepsilon(s)} Q\bigl(s,\pi(\tilde s)\bigr).
-\label{eq:omega}
+\tilde s_t \in B_\varepsilon(s_t).
+\label{eq:ball}
 \end{equation}
-The Q update uses a pessimistic bootstrap $Q(s',\pi(\omega_\pi(s')))$.
-Algorithm~2 maintains a belief $M_t$: $M_0=B_\varepsilon(\tilde s_0)$ (in our tabular code, $M_0=\mathcal{S}$), then
-\begin{equation}
-M_{t+1}=\{s':\exists s\in M_t,\,P(s'|s,a_t)>0\}\;\cap\; B_\varepsilon(\tilde s_{t+1}).
-\label{eq:belief}
-\end{equation}
-Maximin is then taken over $M_t\cap B_\varepsilon(\tilde s_t)$ rather than the full ball.
-BP-DQN (Alg.~4--5) lifts this idea to deep Q-learning with PF-RNN particles~\citep{ma2020pfrnn}; DP-DQN (Alg.~6--7) uses diffusion purification on pixels.
-Our deep pessimistic agent is \textbf{BP-style}: maximin over a finite particle belief and a maximin TD target, but with a simplified GRU belief, not the full PF-RNN of~\citet{sun2024belief}.
-We do not implement DP-DQN.
+In continuous domains $B_\varepsilon(s)$ is the $\ell_\infty$ ball of radius $\varepsilon$ centered at $s$, intersected with the state domain.
+On the tabular grid it is the discrete one-step neighborhood
+\[
+B_\varepsilon(s)=\{s\}\cup\{\text{on-grid cells adjacent to }s\},
+\]
+so $|B_\varepsilon(s)|\le 5$.
+The agent sees only $\tilde s_t$ and must choose $a_t$ from that observation.
+The environment then transitions from the true state, $s_{t+1}\sim P(\cdot\mid s_t,a_t)$, and emits the true reward $R(s_t,a_t)$.
+The next observation, if an attacker is present, is a perturbation of $s_{t+1}$.
 
-\section{Methods}
-\label{sec:methods}
+Three properties of this model matter for a defense.
+The attacker is observation-only, so any loss comes from the agent choosing a poor action, not from a change to dynamics or rewards.
+The attacker is better informed than the defender: it knows $s_t$, and the strongest attacks we use also know the defender's $Q$.
+The defender sees only $\tilde s_t$.
+The interaction is a Stackelberg game with asymmetric observations.
+For a fixed defender $\pi$, the attacker's problem is itself an MDP~\cite{zhang2021robust,sun2024belief}.
+The attacker's state is $s_t$, its action is $\tilde s_t\in B_\varepsilon(s_t)$, and its reward is $-R(s_t,\pi(\tilde s_t))$.
+We use that fact when we freeze a defender and train a DQN to attack it.
 
-All three methods share the same environments, attacker protocol, and (in the deep case) the same vanilla backbone.
-Table~\ref{tab:methods} summarizes the only differences that matter: train-time behavior, Bellman target, and test policy.
+While learning, the agent knows $\varepsilon$, or an upper bound on it, and in the tabular updates it may use the true $s_t$ and $s_{t+1}$ when forming the backup.
+The behavior policy during fine-tuning still acts on the attacked observation.
+This is a modeling choice about what the backup is allowed to see.
+It is separate from the decision the agent has to make at deployment.
+
+Semantic perturbations that leave the $\varepsilon$-ball, including the diffusion attacks of~\cite{sun2025shift}, sit outside this threat model.
+Every attack reported below is required to land in $B_\varepsilon(s)$.
+
+\subsection{Notation}
+Table~\ref{tab:notation} fixes the notation used below.
+We write $\bar s$ and $m$ for candidate true states in an uncertainty set, $\tilde s$ for the perturbed observation, and $s$ for the actual environment state.
 
 \begin{table}[t]
 \centering
 \small
-\caption{The three algorithms compared in this paper. PB-GT is the only method whose test policy is cheaper than its train-time behavior.}
-\label{tab:methods}
-\begin{tabular}{@{}llll@{}}
+\caption{Notation used throughout the paper.}
+\label{tab:notation}
+\begin{tabular}{@{}ll@{}}
 \toprule
- & Vanilla & Pessimistic & \textbf{PB-GT} \\
+Symbol & Meaning \\
 \midrule
-Train beh. & $\varepsilon$-greedy on $s$ & $\varepsilon$-greedy maximin on $\tilde s$ & same as pes. \\
-TD target & greedy on $s'$ & $\max\min$ over $M'$ & greedy on $s'$ \\
-Test (atk.) & greedy on $\tilde s$ & maximin over $M$ & greedy on $\tilde s$ \\
-Belief & none & yes & train only \\
-Paper & DQN & BP-style & \emph{this work} \\
+$s_t\in\mathcal{S}$ & true environment state at step $t$ \\
+$\tilde s_t$ & perturbed observation given to the agent \\
+$\bar s,\;m$ & candidate true state in an uncertainty set \\
+$\mathcal{A},\,a_t$ & action set; action executed at step $t$ \\
+$B_\varepsilon(s)$ & admissible perturbation set \\
+$M_t\subseteq\mathcal{S}$ & belief: states consistent with history \\
+$\omega_\pi$ & attacker's best response to defender $\pi$ \\
+$Q,\,Q_\theta$ & tabular or parameterized action values \\
+$\gamma,\,\alpha$ & discount factor; learning rate \\
+$n$ & number of independent seeds \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Vanilla Q / Double DQN}
-Tabular: $\varepsilon$-greedy on the true state, update~\eqref{eq:vanilla-q}, test $a=\arg\max_a Q(\tilde s,a)$ (or $Q(s,a)$ if clean).
-Deep: Double DQN with Huber loss, MLP $Q_\theta$, greedy test on the (normalized) observation.
+\section{Belief-enriched pessimistic Q-learning and PB-GT}
+\label{sec:pes}
 
-\subsection{Belief-enriched pessimistic Q (tabular)}
-We follow Algorithms~1--2 of~\citet{sun2024belief} with two implementation notes that we state explicitly.
-(i)~The discrete ball $B_\varepsilon(s)$ is the cell $s$ plus its on-grid $1$-step neighbors (up to $5$ states).
-(ii)~When $|M\cap B_\varepsilon(\tilde s)|>1$, our tabular \emph{policy} uses the \emph{mean} Q over the belief rather than the hard $\min$ (a softer tabular approximation); the TD target still uses the maximin construction of~\citet{sun2024belief}.
-Training: clone a vanilla Q-table, then $500$ fine-tune episodes with $\omega_\pi$ (or a learned DQN attacker at test).
-Test under attack: update $M_t$ and act with the belief-restricted policy.
-Clean test: greedy on the true state, for parity with vanilla/PB-GT clean columns.
+PB-GT is a modification of the method of~\cite{sun2024belief}, so we first write the version we implement.
+The inner operator is a hard minimum over the belief.
 
-\subsection{PB-GT Q-learning}
+\subsection{The maximin policy}
+For each action $a$ the agent reads $Q(\bar s,a)$ at every candidate true state that could have produced the observation, keeps the smallest value, and then chooses the action whose worst-case value is largest.
+That rule is Eq.~\eqref{eq:maximin}.
+An average over the ball would mix a bad candidate with harmless ones.
+The attacker is free to pick the bad candidate, and it sees more than the defender does, so the hard $\min$ is the operator that answers the attack we are studying.
+We use it in the pessimistic policy and in the pessimistic backup.
+
+Against such a defender, the attacker's best response under the white-box objective we use in training is
+\begin{equation}
+\omega_\pi(s)=\arg\min_{\tilde s\in B_\varepsilon(s)} Q\bigl(s,\pi(\tilde s)\bigr).
+\label{eq:omega}
+\end{equation}
+The attacker searches the ball for the observation that induces the action with the lowest true value.
+We use Eq.~\eqref{eq:omega} to generate adversarial observations during tabular fine-tuning.
+At evaluation we replace it with the learned attackers of \S\ref{sec:setup}.
+
+The pessimistic Bellman target replaces the greedy bootstrap of Eq.~\eqref{eq:vanilla-q} with a maximin bootstrap over the propagated belief intersected with the $\varepsilon$-ball of the true next state:
+\begin{equation}
+y = R + \gamma \max_{a'} \min_{m \in M' \cap B_\varepsilon(s')} Q(m, a').
+\label{eq:pes-target}
+\end{equation}
+Here $M'$ is the belief after the current step.
+The target uses the true next state $s'$, which matches the training assumption in \S\ref{sec:threat}.
+Because the target evaluates $Q$ at each candidate $m$, the learned values are the values of the maximin policy.
+The operator used to act is the operator used to back up.
+
+\subsection{Belief tracking}
+\label{sec:belief}
+
+Taking the worst case over the entire ball $B_\varepsilon(\tilde s)$ is sound, and it is also cautious.
+Many members of the ball are inconsistent with the actions the agent has already taken.
+The belief $M_t\subseteq\mathcal{S}$ is the set of true states still consistent with the history.
+Restricting the $\min$ to $M_t$ tightens the worst case and keeps the true state inside the set when the update is exact.
+
+Our tabular implementation maintains $M_t$ in two stages, matching the tabular algorithm of~\cite{sun2024belief}.
+Given $M_t$ and the observation $\tilde s_t$, the agent filters:
+\begin{equation}
+M'_t = M_t \cap B_\varepsilon(\tilde s_t).
+\label{eq:belief-filter}
+\end{equation}
+After action $a_t$ it propagates the survivors through the dynamics:
+\begin{equation}
+M_{t+1} = \bigl\{\,s' : \exists\, m\in M'_t,\; P(s'\mid m,a_t)>0 \,\bigr\}.
+\label{eq:belief}
+\end{equation}
+The belief starts at the full state set, $M_0=\mathcal{S}$, and we reset it at the start of every episode.
+If $s_t\in M_t$ and the neighborhood is symmetric, then $s_t\in M'_t$, because $\tilde s_t\in B_\varepsilon(s_t)$ implies $s_t\in B_\varepsilon(\tilde s_t)$.
+Combined with $M_0=\mathcal{S}$, the true state is never discarded by a correct update.
+On the deterministic grid the observation repeatedly intersects a small ball, so $|M_t|$ usually shrinks.
+The policy under attack is
+\begin{equation}
+\pi(\tilde s)=\arg\max_{a\in\mathcal{A}}\;\min_{m\in M \cap B_\varepsilon(\tilde s)} Q(m,a).
+\label{eq:belief-policy}
+\end{equation}
+When the intersection is a singleton, Eq.~\eqref{eq:belief-policy} reduces to a greedy $\arg\max$ at that state.
+If the intersection is empty we fall back to a greedy $\arg\max$ at the observed state.
+In the belief log of \S\ref{sec:gw} that event did not occur.
+
+\subsection{Three design axes}
+\label{sec:methods}
+
+The methods compared in the paper share an environment and an attacker protocol.
+In the deep case they also share a vanilla backbone and the same pretraining budget.
+They differ along three axes: the observations and the behavior rule used while collecting data, the Bellman target, and the test rule.
+Vanilla Q-learning is greedy on all three.
+Belief-enriched pessimistic Q-learning is pessimistic on all three.
+PB-GT is pessimistic on the first axis and greedy on the other two.
+Table~\ref{tab:methods} records the matrix.
+The two extra cells in the later tables swap only the target and the test rule, which is how we separate those two axes from the training distribution.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The three training procedures, along the axes of \S\ref{sec:methods}. The two swapped cells in the results tables keep one method's data and target and the other method's test rule.}
+\label{tab:methods}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & Vanilla & Pessimistic & PB-GT \\
+\midrule
+Train behavior & greedy on $s$ & maximin on $\tilde s$ & same as pes. \\
+TD target & greedy on $s'$ & maximin over $M'$ & greedy on $s'$ \\
+Test & greedy on $\tilde s$ & maximin over $M$ & greedy on $\tilde s$ \\
+Belief at test & no & yes & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pessimistic Q and PB-GT}
 \label{sec:pbgt}
-PB-GT keeps the \emph{data collection} of pessimistic Q-learning and changes only the backup and the test rule.
 
-\paragraph{Training (tabular).}
-At each step, form $\tilde s=\omega_\pi(s)$ (heuristic~\eqref{eq:omega} during learning), take an $\varepsilon$-greedy maximin action w.r.t.\ the current belief, update $M_t$ as in~\eqref{eq:belief}, but update Q with the \emph{vanilla} target:
+Algorithm~\ref{alg:pes-tab} is the tabular pessimistic loop we run.
+We start from a copy of a pretrained vanilla $Q$-table, reset the belief to $\mathcal{S}$ at each episode, form $\tilde s=\omega_\pi(s)$, take an $\varepsilon$-greedy maximin action, and update $Q(s,a)$ with Eq.~\eqref{eq:pes-target}.
+At deployment the agent updates $M_t$ and acts by Eq.~\eqref{eq:belief-policy}, including on episodes with no attacker.
+The clean number for this method is that deployed rule.
+A greedy readout of the same table, $a=\arg\max_a Q(s,a)$ on the true state, is reported separately so that a cautious maximin can be distinguished from a broken $Q$-function.
+Sun and Zheng evaluate natural reward with the deployed belief and maximin rule.
+We do the same.
+
+PB-GT inherits the data collection of pessimistic Q-learning and changes the backup and the test rule.
+Algorithm~\ref{alg:pbgt-tab} is the tabular loop.
+The first half of each training step matches Algorithm~\ref{alg:pes-tab}: the same adversarial observations, the same belief, and the same maximin behavior, so the distribution of visited pairs $(s,a)$ is the same.
+The update is the ordinary greedy backup of Eq.~\eqref{eq:vanilla-q}, written again as
 \begin{equation}
 Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\bigl(R+\gamma\max_{a'}Q(s',a')\bigr).
 \label{eq:pbgt-tab}
 \end{equation}
-Belief is used to choose $a$, not to form the backup.
-
-\paragraph{Testing.}
-Ignore belief and maximin:
+In the tabular setting this is a plain Q-learning backup.
+There is no second network and no Double DQN correction.
+The belief decides where the agent goes during training.
+It is not used in the target.
+At deployment the belief and the maximin are dropped,
 \begin{equation}
-a=\arg\max_{a} Q(\tilde s,a).
+a=\arg\max_{a} Q(\tilde s,a),
 \label{eq:pbgt-test}
 \end{equation}
-Inference cost therefore matches vanilla.
+so the inference cost matches vanilla: one table lookup, or one forward pass in the deep case.
 
-\paragraph{Why this might help.}
-Pessimistic rollouts expose the Q-function to adversarial observations and to maximin actions, so the learned $Q$ can be more robust than vanilla even if the \emph{test} policy is greedy.
-The cost of maximin is paid only during training.
-The risk---confirmed on GridWorld---is that a greedy test policy can still be exploited by a strong attacker, so PB-GT should not be expected to match full pessimism.
+Substituting Eq.~\eqref{eq:pbgt-tab} for Eq.~\eqref{eq:pes-target} changes the fixed point.
+Pessimistic Q-learning applies a maximin Bellman operator, so its fixed point is the value of the maximin policy under adversarial observations.
+PB-GT applies the standard optimality operator.
+If its data cover the state space, that fixed point is the ordinary $Q^\star$ of the unperturbed MDP.
+Pessimistic behavior changes the sampling distribution and does not, by itself, change the fixed point.
+A greedy policy read from an accurate $Q^\star$ can still be exploited, because the attacker chooses $\tilde s$ so that $\arg\max_a Q^\star(\tilde s,a)$ is a poor action at the true $s$.
+The swap in the experiments holds the training data fixed and changes the target and the test rule, so a gap between the four cells is a gap between those operators.
 
-\paragraph{Deep PB-GT DQN.}
-Fine-tune from a pretrained vanilla DQN (optionally freeze the MLP backbone; train the last linear layer).
-Collection matches BP-style training: random-search PGD in $B_\varepsilon(s)$ to form $\tilde s$, $\varepsilon$-greedy maximin over GRU particles $M_t$, store $(s,a,r,s',M')$ .
-The loss uses Double-DQN greedy targets on the \emph{true} $s'$, \emph{not}
-$y=r+\gamma\max_{a'}\min_{m\in M'}Q_{\theta'}(m,a')$.
-Test is Algorithm~B: greedy on $\tilde s$.
-Pseudocode is given in Appendix~\ref{app:alg}.
+\begin{algorithm}[t]
+\caption{Belief-enriched pessimistic Q (tabular)}
+\label{alg:pes-tab}
+\KwIn{pretrained $Q$; budget $\varepsilon$; episodes $E$}
+\KwOut{fine-tuned $Q$}
+$Q\leftarrow$ copy of pretrained table\;
+\For{$e=1$ \KwTo $E$}{
+  reset $s$; $M\leftarrow\mathcal{S}$\;
+  \While{$s$ not terminal and step cap not hit}{
+    $\pi(\cdot)\leftarrow\arg\max_a\min_{m\in M\cap B_\varepsilon(\cdot)}Q(m,a)$\;
+    $\tilde s\leftarrow\omega_\pi(s)$\;
+    $a\leftarrow\varepsilon$-greedy w.r.t.\ $\pi(\tilde s)$\;
+    execute $a$, observe $R,s'$\;
+    $M\leftarrow$ filter and propagate, Eqs.~\eqref{eq:belief-filter}--\eqref{eq:belief}\;
+    $y\leftarrow R+\gamma\max_{a'}\min_{m\in M\cap B_\varepsilon(s')}Q(m,a')$\;
+    $Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha\,y$\;
+    $s\leftarrow s'$\;
+  }
+}
+\textbf{Test:} act by Eq.~\eqref{eq:belief-policy}, with or without an attacker\;
+\end{algorithm}
 
 \begin{algorithm}[t]
 \caption{PB-GT Q-learning (tabular)}
@@ -200,216 +368,500 @@ Pseudocode is given in Appendix~\ref{app:alg}.
 $Q\leftarrow$ copy of pretrained table\;
 \For{$e=1$ \KwTo $E$}{
   reset $s$; $M\leftarrow\mathcal{S}$\;
-  \While{$s$ not terminal}{
-    update $\pi$ from $Q$ with belief $M$\;
+  \While{$s$ not terminal and step cap not hit}{
+    $\pi(\cdot)\leftarrow\arg\max_a\min_{m\in M\cap B_\varepsilon(\cdot)}Q(m,a)$\;
     $\tilde s\leftarrow\omega_\pi(s)$\;
-    $a\leftarrow\varepsilon$-greedy maximin w.r.t.\ $M\cap B_\varepsilon(\tilde s)$\;
+    $a\leftarrow\varepsilon$-greedy w.r.t.\ $\pi(\tilde s)$\;
     execute $a$, observe $R,s'$\;
+    \textbf{greedy backup:}
     $Q(s,a)\leftarrow (1-\alpha)Q(s,a)+\alpha(R+\gamma\max_{a'}Q(s',a'))$\;
-    update $M$ by~\eqref{eq:belief}\;
+    $M\leftarrow$ filter and propagate\;
     $s\leftarrow s'$\;
   }
 }
+\textbf{Test:} $a=\arg\max_a Q(\tilde s,a)$; no belief and no maximin\;
 \end{algorithm}
+
+\subsection{Deep settings and the sound box}
+\label{sec:deep}
+
+This is not a reproduction of BP-DQN.
+We do not train the particle-filter RNN of~\cite{sun2024belief}, and we do not run their $10{\times}10$ maze or Atari suite.
+The deep experiments use a sound set-membership box in place of a learned belief.
+On the continuous grid and on CartPole that box uses the true dynamics model.
+BP-DQN's learned belief does not need that model.
+Appendix~\ref{app:box} writes the box update in one place.
+A failed GRU-particle port of the CartPole agent is kept in Appendix~\ref{app:cp-extra} as a record of that attempt, and it is not a column of the main comparison.
+
+In the deep case, pessimistic and PB-GT fine-tune from a pretrained vanilla DQN.
+On continuous GridWorld the backbone is not frozen.
+On the trained CartPole run we freeze it and train only the last linear layer.
+Data collection matches the pessimistic behavior rule: an attacker produces $\tilde s\in B_\varepsilon(s)$, and the action is $\varepsilon$-greedy maximin over the current box.
+PB-GT then forms Double DQN greedy targets on the true next state.
+The pessimistic backup is a maximin over the propagated next box.
+Double DQN is used only in these deep settings.
+Testing for PB-GT is a greedy $\arg\max$ on $\tilde s$.
+Testing for the pessimistic agent is maximin over the box, including on clean episodes.
+Pseudocode for the deep PB-GT loop is Appendix~\ref{app:alg}.
 
 \section{Experimental setup}
 \label{sec:setup}
 
+Returns below are means across seeds, with the sample standard deviation (ddof${=}1$), unless a sentence says otherwise.
+Win rates count a seed only when one method's return is strictly larger.
+
 \subsection{Tabular GridWorld}
-A custom $5{\times}5$ grid~\citep[related to the discrete setting discussed by][]{sun2024belief}.
-Default cell reward $-1$; gold at $(0,3)$ with $+10$ (terminal); bomb at $(4,3)$ with $-10$ (terminal); four deterministic move actions with stay-on-wall.
-$\gamma=1$, $\alpha$ linearly annealed, vanilla pretrain $2000$ episodes, robust fine-tune $500$ episodes from the \emph{same} Q initialization, evaluation $100$ episodes, episode cap $1000$ steps.
-The discrete $\varepsilon$-ball is the $1$-step neighborhood.
-We report mean episodic return $\pm$ standard deviation across \textbf{$500$ independent seeds}.
+\label{sec:gw-setup}
 
-\paragraph{Attackers.}
-We train Stable-Baselines3 DQN attackers once (frozen) against pessimistic and PB-GT defenders; attacker action is a perturbation direction in $\{\mathrm{UP},\mathrm{DOWN},\mathrm{LEFT},\mathrm{RIGHT},\mathrm{STAY}\}$.
-At evaluation, vanilla is tested against the pessimistic attacker; pessimistic and PB-GT are tested against their own attackers (matched threat).
-This is the protocol behind Table~\ref{tab:gw} and is \emph{not} identical to MinBest / PA-AD / iterative PGD in~\citet{sun2024belief}.
+The discrete testbed is a $5{\times}5$ grid.
+Every non-terminal transition costs $-1$.
+A gold cell at $(0,3)$ yields $+10$ and ends the episode.
+A bomb cell at $(4,3)$ yields $-10$ and ends the episode.
+The four move actions are deterministic, and a move into a wall leaves the agent in place.
+We set $\gamma=1$ and anneal the learning rate.
+The discrete neighborhood is the one in \S\ref{sec:threat}.
+Episodes are capped at $1000$ steps, so an attacker can hurt the agent by steering it into the bomb or by trapping it in a loop that only accumulates step costs.
 
-\subsection{CartPole-v1 (preliminary)}
-Gymnasium CartPole-v1, observations linearly scaled to $[-1,1]$, attack budget $\varepsilon=0.05$ in raw coordinates ($L_\infty$).
-Vanilla: Double DQN, MLP $[128,128]$, $5{\times}10^5$ steps, mid-eval + best-checkpoint restore (solve gate $\geq 475$).
-Belief: GRU (hidden $64$) emitting $\kappa{=}20$ particles, pretrained $30$k steps on clean rollouts with synthetic noise---a simplified analogue of PF-RNN, \emph{not} $\kappa_p{=}30$ PF-LSTM BP-DQN.
-Pessimistic fine-tune: clone vanilla, freeze backbone, LR $5{\cdot}10^{-5}$, up to $10^5$ steps, maximin TD target, early-stop / restore-best.
-PB-GT fine-tune: same collection, greedy targets, $4{\times}10^4$ steps, LR $10^{-5}$.
-\textbf{$n{=}5$ seeds} ($0$--$4$).
-Hardware: Apple M1 Pro, CPU, PyTorch $2.8$, Gymnasium $1.1.1$.
-\citet{sun2024belief} used an RTX $3090$; we flag this gap.
+Each seed starts with $2000$ episodes of vanilla Q-learning.
+Pessimistic Q-learning and PB-GT then fine-tune for $500$ episodes from that same table.
+We evaluate $100$ episodes per cell, again capped at $1000$ steps, and we repeat the pipeline for $500$ seeds.
 
-\paragraph{CartPole metrics} (mean return over $100$ eval episodes per seed).
-(1)~Clean: greedy on true $s$ (pessimistic also logs maximin-on-clean separately).
-(2)~Matched attacker: SB3 DQN, $81{=}3^4$ discrete $\delta$ per dimension, $80$k steps per (seed, defender); vanilla/PB-GT defend greedily, pessimistic with maximin-over-belief.
-(3)~Shared random $\delta\sim\mathrm{Unif}([-\varepsilon,\varepsilon]^4)$ from a shared RNG stream.
-(4)~PGD*: $32$-candidate random search in $B_\varepsilon(s)$ scoring $Q(s,\pi(\tilde s))$---defender-specific, \emph{not} the $10$-step PGD ($\eta{=}10$) of~\citet{sun2024belief}.
+\paragraph{Learned attackers.}
+Evaluation attacks are learned and then frozen.
+We train three Stable-Baselines3 DQN attackers for each of five defender rules: vanilla, pessimistic $Q$ with maximin test, PB-GT $Q$ with greedy test, pessimistic $Q$ with greedy test, and PB-GT $Q$ with maximin test.
+Together those are fifteen attackers.
+Each of the three attackers for a rule is trained against a different defender seed ($99999$, $99998$, or $99997$) and a different attacker seed.
+The attacker's action is a direction in $\{\mathrm{UP},\mathrm{DOWN},\mathrm{LEFT},\mathrm{RIGHT},\mathrm{STAY}\}$, applied to the true cell and clipped to the grid, so the observation lies in $B_\varepsilon(s)$.
+$\mathrm{STAY}$ reports the true cell, so ``no attack'' is already in every attacker's action set.
+The attacker's reward is the negation of the defender's reward.
+Those fifteen attackers observe the true state but not the defender's belief.
+
+Against the two maximin rules we also train six \emph{belief-aware} attackers: three for pessimistic $Q$ with maximin test and three for PB-GT $Q$ with maximin test, again against defender seeds $99999$, $99998$, and $99997$, with the same training budget and architecture.
+Each belief-aware attacker observes the true cell together with a $25$-dimensional binary mask of the defender's current belief, so its policy can condition on the history-dependent set that the maximin uses.
+All five deployed rules are scored against these six attackers as well.
+
+\emph{Matched} return for a greedy or vanilla rule is the mean, on that seed, of that rule's own three (belief-blind) attackers.
+For a maximin rule, matched return in the main table is the mean of that rule's own three belief-aware attackers.
+\emph{Worst-of-22} return is the per-seed minimum over all twenty-one learned attackers (the original fifteen plus the six belief-aware ones) and the clean (no-attack) return under the same deployed rule.
+Because $\mathrm{STAY}$ is already an attacker action, the worst case per seed must include no attack.
+Appendix~\ref{app:worst910} keeps the older pools: belief-blind matched for the maximin rows, worst-of-9 and worst-of-10, and worst-of-15 and worst-of-16.
+
+A single frozen attacker is a poor summary on this grid.
+The sample standard deviation of a method's three own-attacker means (each mean taken across the $500$ defender seeds) is $157.64$ for vanilla, $64.14$ for pessimistic $Q$ with maximin test under the belief-blind own three, $2.80$ for pessimistic $Q$ with greedy test, $146.26$ for PB-GT $Q$ with maximin test under the belief-blind own three, and $102.19$ for PB-GT $Q$ with greedy test.
+Those spreads are why every attack column is either a mean over a rule's own three attackers or a minimum over the full set, rather than the return against one attacker.
+
+Inference time is wall-clock milliseconds per decision on a single process.
+The timer starts after the attacker has produced $\tilde s$ and stops before the environment step.
+For the pessimistic agent the measured path includes the belief update and the maximin.
+For vanilla and PB-GT it is the $\arg\max$.
+We time seeds $0$--$19$ on the attack path of those three deployed rules.
+The swapped cells use the same code paths, so the table reuses those measurements.
+A separate timing of greedy readouts on clean episodes is not used as the cost of maximin.
+
+\subsection{Continuous GridWorld}
+\label{sec:cgw-setup}
+
+The function-approximation testbed is a continuous-state lift of the same $5{\times}5$ grid.
+States are pairs $(x,y)\in[0,5]^2$.
+The four actions translate the agent by $0.5$, and a move into a wall leaves the agent in place.
+Gold and bomb rectangles correspond to the tabular cells $(0,3)$ and $(4,3)$, with an extra bomb adjacent to the gold and a barrier that forces a corridor.
+Every non-terminal step costs $-1$.
+Episodes are capped at $100$ steps.
+The $Q$-network is a $2{\to}128{\to}128{\to}4$ MLP trained with Double DQN.
+The production comparison uses $\varepsilon{=}0.25$, $80$k vanilla steps, $25$k fine-tuning steps, $50$ evaluation episodes, and $10$ seeds.
+The target/test swap on this environment was run for seeds $0$--$4$ only, and it is labeled as five seeds wherever it is reported.
+We chose $\varepsilon{=}0.25$ from the earlier, shorter sweeps in Appendix~\ref{app:eps}, where the pessimistic greedy clean return is least damaged, and the final $80$k+$25$k schedule was run only at $0.25$.
+
+The belief is the sound box of Appendix~\ref{app:box}.
+We also evaluate a memoryless sound $\varepsilon$-ball: a $3{\times}3$ lattice on $B_\varepsilon(\tilde s)$ with no temporal intersection.
+In both cases the inner operator is a hard minimum over the lattice.
+PB-GT uses the box during training and discards it at test time.
+
+Each seed is evaluated on several suites, defined here so the tables can stay short.
+A \emph{clean} episode has no attacker.
+The agent uses the rule it deploys: maximin over the box for pessimistic methods, and a greedy readout for vanilla and for PB-GT.
+We also log a greedy readout of the pessimistic weights on clean states.
+A \emph{shared-random} episode adds $\delta\sim\mathrm{Unif}([-\varepsilon,\varepsilon]^2)$ from a shared random stream, so every method sees the same noise sequence.
+A \emph{PGD-10} episode runs a $10$-step projected gradient attack with the MinBest objective on $Q(\tilde s, a^\star)$, where $a^\star$ is the greedy action at the true state.
+A \emph{matched search} episode scores $32$ candidates by $Q(s,\pi(\tilde s))$ under the defender's actual test rule.
+A \emph{matched SB3} episode uses a DQN attacker trained for $40$k steps against that defender and seed, with a $5{\times}5$ perturbation grid inside the ball.
+
+\subsection{CartPole-v1}
+\label{sec:cp-setup}
+
+The third setting is Gymnasium CartPole-v1.
+Observations are scaled to $[-1,1]$ for the network.
+The attack budget is $\varepsilon{=}0.05$ in raw coordinates under $L_\infty$.
+The vanilla agent is a Double DQN with a $[128,128]$ MLP, trained for $5{\times}10^5$ steps, with a solve gate of return at least $475$.
+We run seeds $0$--$4$ on one CPU thread.
+
+Pessimistic and PB-GT clone that checkpoint, freeze the backbone, and train the last linear layer at learning rate $10^{-5}$.
+The belief is a sound filter-then-propagate box with interval dynamics, and the inner min is a hard min over $16$ lattice points.
+Behavior during fine-tuning is $\varepsilon$-greedy maximin on an attacked observation.
+The pessimistic backup is maximin over the next box, and the deployed test rule is that same maximin, including on clean episodes.
+PB-GT uses a greedy Double DQN target on the true next state and a greedy test policy.
+The pessimistic budget is capped at $5{\times}10^4$ steps.
+Every $5{\times}10^3$ steps, including step~$0$, we record clean return under the deployed maximin rule and keep the weights with the best deployed clean return.
+If that return has reached $475$ and a later evaluation falls below $400$, training stops and the best checkpoint is restored.
+PB-GT fine-tunes for $4{\times}10^4$ steps.
+
+Evaluation uses $50$ episodes per cell.
+A shared-random episode adds $\delta\sim\mathrm{Unif}([-\varepsilon,\varepsilon]^4)$ from a shared stream.
+A \emph{PGD*} episode draws $32$ candidates inside $B_\varepsilon(s)$ and scores $Q(s,\pi(\tilde s))$.
+PGD* is that random search.
+It is not the $10$-step iterative PGD used on the continuous grid.
+The unshaped matched attacker is a DQN trained for $40$k steps on the environment return.
+A cell is vacuous when that attacker never ended an episode during its training.
+The shaped attacker uses the same budget with reward $|\theta|+0.1|x|$.
+Inference time is single-process wall clock per action, summarized as the mean of the five per-seed means.
+Pole-sensor attacks, an $\varepsilon$ sweep, a position-sensor variant, the frozen-weight rule swap, and the failed GRU port are Appendix~\ref{app:cp-extra}.
 
 \section{Results}
 \label{sec:results}
 
-\subsection{GridWorld: robustness--speed tradeoff}
+\subsection{Tabular grid: the test rule carries most of the gap}
 \label{sec:gw}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Tabular $5{\times}5$ GridWorld, $500$ seeds, sample std (ddof${=}1$).
+Clean uses the deployed rule and also reports the median.
+The greedy-readout column is a diagnostic for the maximin-test rows.
+Matched (own~3) averages a rule's own three attackers: belief-aware for the two maximin rows, belief-blind for the greedy and vanilla rows.
+Worst-of-22 is the per-seed minimum over all twenty-one learned attackers and the clean return; ``no attack'' (the attacker always reporting the true cell, i.e.\ $\mathrm{STAY}$) is in every attacker's action set, so the worst case per seed must include it.
+The row ``Pessimistic, maximin'' is the full method of~\cite{sun2024belief}, and ``PB-GT, greedy'' is PB-GT. The greedy-readout medians are $7.09$ and $7.44$. Inference times are in Table~\ref{tab:speed}.
+Belief-blind matched for the maximin rows, and worst-of-9/10/15/16, are Appendix~\ref{app:worst910}.}
+\label{tab:gw}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+ & & \multicolumn{2}{c}{Clean (deployed rule)} & Clean, greedy & Matched & Worst \\
+\cmidrule(lr){3-4}
+$Q$-table & Test rule & mean${\pm}$std & median & readout & (own 3) & of 22 \\
+\midrule
+Vanilla & greedy & $7.35{\pm}0.24$ & $7.38$ & --- & $-612.41{\pm}166.08$ & $-968.88{\pm}49.86$ \\
+\addlinespace
+Pessimistic & maximin & $-687.34{\pm}305.52$ & $-788.44$ & $-15.14{\pm}70.83$ & $\mathbf{-435.30{\pm}185.98}$ & $\mathbf{-744.33{\pm}234.97}$ \\
+Pessimistic & greedy & $-15.14{\pm}70.83$ & $7.09$ & --- & $-690.23{\pm}236.80$ & $-975.80{\pm}42.18$ \\
+\addlinespace
+PB-GT & greedy & $7.45{\pm}0.18$ & $7.44$ & --- & $-563.93{\pm}264.05$ & $-950.40{\pm}60.05$ \\
+PB-GT & maximin & $-732.38{\pm}263.97$ & $-828.49$ & $7.45{\pm}0.18$ & $-610.51{\pm}235.09$ & $-848.28{\pm}167.36$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/fig1_gridworld_bars.pdf}
+\caption{Tabular grid, mean return $\pm$ sample std, $500$ seeds.
+Clean uses the deployed rule.
+Matched uses belief-aware own-three attackers for the maximin rows and belief-blind own-three for the others.
+The third panel is worst-of-22.
+Each axis is wide enough to include the error bars.}
+\label{fig:gw-bars}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/fig2_gridworld_box.pdf}
+\caption{Per-seed attack returns on the tabular grid: matched (own~3) and worst-of-22.
+Boxes show the median and the interquartile range, and the tails are plotted.}
+\label{fig:gw-box}
+\end{figure*}
+
+Table~\ref{tab:gw} and Figures~\ref{fig:gw-bars}--\ref{fig:gw-box} are the tabular comparison.
+Under worst-of-22, maximin test beats greedy test on $89.6\%$ of seeds ($448$ better, $30$ tied, $22$ worse) for the pessimistic $Q$-table and on $76.4\%$ of seeds ($382$ / $38$ / $80$) for the PB-GT $Q$-table.
+Most of the gap between the full pessimistic agent and a greedy test rule is the test rule.
+
+Once both agents already use maximin, the pessimistic backup adds protection on most seeds against the stronger attackers, and the gain is smaller than the test-rule gain: pessimistic $Q$ with maximin test beats PB-GT $Q$ with maximin test on $79.0\%$ of seeds under belief-aware matched attackers ($395$ / $0$ / $105$; means $-435.30{\pm}185.98$ against $-610.51{\pm}235.09$) and on $65.4\%$ of seeds under worst-of-22 ($327$ / $26$ / $147$; means $-744.33{\pm}234.97$, median $-799.52$, against $-848.28{\pm}167.36$, median $-889.15$).
+On the continuous grid the five-seed swap shows no measurable gain from the backup.
+
+Belief-blind attackers overstated how robust maximin looks under matched evaluation.
+Against their own three belief-blind attackers the maximin means were $-158.93{\pm}106.87$ (pessimistic) and $-352.12{\pm}148.23$ (PB-GT); once the attacker sees the belief those means fall to $-435.30{\pm}185.98$ and $-610.51{\pm}235.09$.
+The test-rule ordering under worst-of-22 still holds.
+
+PB-GT and vanilla, compared on each method's own three belief-blind attackers, are close.
+PB-GT's matched mean is $-563.93{\pm}264.05$ and vanilla's is $-612.41{\pm}166.08$.
+PB-GT is strictly better on $59.0\%$ of seeds, tied on $0.2\%$, and worse on $40.8\%$.
+Under worst-of-9 the same comparison has means $-924.36{\pm}82.48$ for PB-GT and $-950.67{\pm}65.09$ for vanilla (Appendix~\ref{app:worst910}).
+PB-GT is strictly better on $27.8\%$ of seeds, tied on $70.0\%$, and worse on $2.2\%$.
+Under worst-of-22 the means are $-950.40{\pm}60.05$ for PB-GT and $-968.88{\pm}49.86$ for vanilla.
+PB-GT is strictly better on $24.4\%$ of seeds, tied on $75.2\%$, and worse on $0.4\%$.
+
+The belief-aware attackers also change who sets the worst case.
+Under worst-of-22, counting a seed only when a single source class alone achieves the minimum, no attack alone sets the worst return on $268$ of $500$ seeds for pessimistic $Q$ with maximin test and on $159$ of $500$ for PB-GT $Q$ with maximin test; a belief-aware attacker alone sets it on $148$ and $293$ seeds respectively; one of the original fifteen alone sets it on $43$ and $6$ seeds.
+Under worst-of-22 the means are $-744.33{\pm}234.97$ (median $-799.52$) for pessimistic $Q$ with maximin test, $-848.28{\pm}167.36$ (median $-889.15$) for PB-GT $Q$ with maximin test, $-975.80{\pm}42.18$ for pessimistic $Q$ with greedy test, $-950.40{\pm}60.05$ for PB-GT $Q$ with greedy test, and $-968.88{\pm}49.86$ for vanilla.
+On the continuous grid and on CartPole, no attack never sets the worst case in the suites we report; those environments are unchanged by this tabular correction.
+
+The deployed maximin rule pays for this robustness on clean episodes.
+Pessimistic clean return is $-687.34{\pm}305.52$, with median $-788.44$ and interquartile range $[-929.60,\,-547.84]$.
+Maximin on the PB-GT table is $-732.38{\pm}263.97$, median $-828.49$.
+A $50$-seed log of the maximin-test cells, $100$ episodes each, shows why.
+Every logged episode begins with belief size $25$, the full grid, because the belief is cleared at episode boundaries.
+With no attacker the observation is the true cell, the true state is inside the belief on every step, and the intersection $M\cap B_\varepsilon$ is never empty.
+The mean size of that intersection is $3.64$ for the pessimistic table and $3.67$ for the PB-GT table.
+Maximin over three or four cells, on a map where the one-cell neighborhood already reaches cells next to the bomb, is cautious enough that $69.7\%$ of pessimistic clean episodes and $73.5\%$ of PB-GT clean episodes hit the $1000$-step cap.
+Under attack on the pessimistic table the mean intersection falls to $2.53$, still with the true state always inside and with no empty intersections.
+The greedy readout of the same pessimistic table, which is the clean cell of the swapped greedy-test row, has mean $-15.14{\pm}70.83$ and median $7.09$.
+The $Q$-function can still reach the goal on a typical episode when it is queried at the true cell.
+The clean loss is a property of taking the worst case over a belief that has not collapsed to a singleton.
+
+Sun and Zheng also report a clean loss when the deployed rule is used with no attack, and on Atari it is small (Pong $19.9$ against a clean $21$, Freeway $28.8$ against $34$).
+They argue that no fixed policy is optimal against every attack.
+A likely reason our tabular clean loss is much larger is that the budget is large relative to the map: one cell on a $5{\times}5$ grid, with neighborhoods that touch cells next to the bomb, compared with their continuous $10{\times}10$ map at $\varepsilon\in[0.1,0.5]$.
+Their Theorem~1 assumes $\gamma<1$ and Lipschitz reward and transition.
+Our tabular setting has $\gamma=1$ and discrete dynamics, so it does not meet those assumptions, and the tabular clean result does not contradict the theorem.
+Their Table~2 ablation, maximin without a belief at $-71$ against BP-DQN at $176$ on GridWorld with $\varepsilon=0.5$, lines up with the memoryless-ball result in \S\ref{sec:cgw}: shrinking the set with history is doing work that the raw ball does not do.
+A practical next step on our grid is hybrid inference that calls maximin only when the belief is still large or the margin between the top greedy actions is small, and uses the greedy readout otherwise.
+
+\subsection{Continuous grid}
+\label{sec:cgw}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Continuous lift of the $5{\times}5$ grid, $\varepsilon{=}0.25$, $80$k vanilla steps plus $25$k fine-tuning, $50$ episodes, $10$ seeds.
+Entries are the mean $\pm$ sample std of the per-seed means.
+Clean, maximin is the deployed rule for the two pessimistic rows.
+Clean, greedy is the deployed rule for vanilla and PB-GT, and it is the diagnostic readout for the pessimistic rows.
+PB-GT was not evaluated with a maximin test on all ten seeds.}
+\label{tab:cgw}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Condition & Vanilla & Pes.\ (box) & PB-GT & Pes.\ (ball) \\
+\midrule
+Clean, greedy & $4.08{\pm}1.17$ & $4.51{\pm}0.47$ & $4.60{\pm}0.46$ & $0.58{\pm}2.44$ \\
+Clean, maximin & --- & $3.67{\pm}2.11$ & --- & $-0.55{\pm}2.43$ \\
+Shared-random & $4.34{\pm}0.59$ & $4.37{\pm}0.37$ & $4.24{\pm}0.69$ & $0.26{\pm}1.92$ \\
+PGD-10 & $4.06{\pm}0.68$ & $4.02{\pm}0.46$ & $4.06{\pm}0.58$ & $-2.86{\pm}2.64$ \\
+Matched search & $-20.75{\pm}9.09$ & $1.98{\pm}2.94$ & $-16.12{\pm}9.43$ & $-26.02{\pm}14.26$ \\
+Matched SB3 & $-18.12{\pm}9.88$ & $1.34{\pm}2.59$ & $-14.06{\pm}8.48$ & $-28.22{\pm}15.68$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig6_gridworld_cont.pdf}
+\caption{Continuous GridWorld, ten seeds, $\varepsilon{=}0.25$.
+Clean bars use the deployed rule: maximin for the two pessimistic methods, greedy for vanilla and PB-GT.
+Error bars are the sample std of the per-seed means.}
+\label{fig:cgw}
+\end{figure*}
 
 \begin{table}[t]
 \centering
 \small
-\caption{Tabular $5{\times}5$ GridWorld, $500$ seeds. Clean and attack returns are mean episodic return $\pm$ std across seeds. Inference is mean ms/step under attack.}
-\label{tab:gw}
-\setlength{\tabcolsep}{3.5pt}
-\begin{tabular}{@{}lccc@{}}
+\caption{Target/test swap on the continuous grid, seeds $0$--$4$ only.
+These five seeds are a subset of Table~\ref{tab:cgw}.
+Entries are mean $\pm$ sample std of the per-seed means.
+Diagonal cells are seeds $0$--$4$ of the ten-seed comparison.
+Off-diagonal PGD-10 cells are the same seeds under the swapped test rule.}
+\label{tab:cgw-swap}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lcc@{}}
 \toprule
-Method & Clean & Under attack & Atk.\ infer.\ (ms) \\
+ & Pes.\ $Q$ & PB-GT $Q$ \\
 \midrule
-Vanilla & $7.35{\pm}0.24$ & $-682.1{\pm}329.0$ & $0.008$ \\
-Pessimistic & $7.35{\pm}0.27$ & $\mathbf{-21.8{\pm}50.0}$ & $0.093$ \\
-PB-GT & $7.37{\pm}0.23$ & $-552.4{\pm}335.2$ & $0.008$ \\
+\multicolumn{3}{@{}l}{\emph{Clean (deployed rule)}} \\
+Maximin test & $2.85{\pm}2.86$ & $4.41{\pm}0.37$ \\
+Greedy test & $4.42{\pm}0.29$ & $4.62{\pm}0.47$ \\
+\multicolumn{3}{@{}l}{\emph{Matched search}} \\
+Maximin test & $0.82{\pm}3.14$ & $1.86{\pm}2.46$ \\
+Greedy test & $-15.44{\pm}4.07$ & $-17.01{\pm}7.84$ \\
+\multicolumn{3}{@{}l}{\emph{Matched SB3}} \\
+Maximin test & $-0.07{\pm}2.78$ & $2.26{\pm}3.69$ \\
+Greedy test & $-15.05{\pm}6.77$ & $-17.63{\pm}9.98$ \\
+\multicolumn{3}{@{}l}{\emph{PGD-10}} \\
+Maximin test & $3.78{\pm}0.36$ & $4.42{\pm}0.38$ \\
+Greedy test & $0.96{\pm}2.71$ & $3.91{\pm}0.72$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+Table~\ref{tab:cgw} and Figure~\ref{fig:cgw} are the ten-seed comparison.
+With the deployed maximin rule, pessimistic(box) clean return is $3.67{\pm}2.11$, milder than the tabular clean loss, and the greedy readout of the same weights is $4.51{\pm}0.47$, next to vanilla's greedy clean return of $4.08{\pm}1.17$.
+The memoryless ball does not keep a usable clean policy (maximin $-0.55{\pm}2.43$, greedy readout $0.58{\pm}2.44$).
+Pessimistic(box) is strictly above vanilla on all $10$ seeds under matched search and on all $10$ seeds under matched SB3.
+On the other suites the strict-win counts are $3/10$ on deployed clean, $4/10$ on shared-random, and $2/10$ on PGD-10.
+PB-GT's matched means, $-16.12{\pm}9.43$ and $-14.06{\pm}8.48$, stay in the same range as vanilla's $-20.75{\pm}9.09$ and $-18.12{\pm}9.88$, far below the box.
+
+PGD-10 barely moves vanilla, the box, or PB-GT.
+It is a standard MinBest attack, and on this environment it flips the greedy action on $28\%$ of visited states ($47\%$ of states where some lattice point inside the ball would flip the action), which is why it is weak here.
+
+Table~\ref{tab:cgw-swap} is the same target/test swap, on seeds $0$--$4$ only.
+On both matched suites, maximin test beats greedy test on all five seeds for the pessimistic $Q$-network and on all five seeds for the PB-GT network.
+The clean column of that table is the other direction on some seeds: the deployed maximin reading of pessimistic $Q$ averages $2.85{\pm}2.86$, while the greedy reading averages $4.42{\pm}0.29$.
+PB-GT $Q$ with the maximin test is higher on average than pessimistic $Q$ with the maximin test on clean ($4.41{\pm}0.37$ against $2.85{\pm}2.86$), on matched search ($1.86{\pm}2.46$ against $0.82{\pm}3.14$), and on matched SB3 ($2.26{\pm}3.69$ against $-0.07{\pm}2.78$); per seed, $2$ of $5$ on matched search and $5$ of $5$ on clean and matched SB3.
+On this grid the pessimistic backup adds no measurable gain in these five seeds over the test rule.
+Five seeds are enough to see the matched-attack ordering.
+They are not a substitute for the tabular study of heavy tails.
+
+\subsection{CartPole: trained sound box}
+\label{sec:cp}
+
+\begin{table*}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig1_gridworld_bars.png}
-\caption{GridWorld mean return $\pm$ std ($n{=}500$). Clean performance is indistinguishable; under a trained DQN attacker the ordering is pessimistic $\gg$ PB-GT $>$ vanilla.}
-\label{fig:gw-bars}
-\end{figure}
+\small
+\caption{Trained sound-box CartPole, $\varepsilon{=}0.05$, $50$ episodes, five seeds.
+Mean $\pm$ sample std of the per-seed means.
+Clean for pessimistic is the deployed maximin rule.
+The shaped attacker uses reward $|\theta|+0.1|x|$.}
+\label{tab:cp}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & Clean & Shared-random & PGD* & \shortstack{Shaped\\$|\theta|{+}0.1|x|$} \\
+\midrule
+Vanilla & $500.0{\pm}0.0$ & $290.9{\pm}181.3$ & $300.1{\pm}163.8$ & $300.2{\pm}181.6$ \\
+Pessimistic & $500.0{\pm}0.0$ & $483.5{\pm}37.0$ & $459.0{\pm}91.6$ & $420.0{\pm}178.9$ \\
+PB-GT & $418.3{\pm}163.1$ & $131.3{\pm}131.4$ & $133.7{\pm}82.7$ & $258.6{\pm}184.9$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
-\begin{figure}[t]
+\begin{table*}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig2_gridworld_box.png}
-\caption{Distribution of attack returns across $500$ seeds (outliers hidden). Pessimistic mass is near zero; vanilla and PB-GT have heavy negative tails.}
-\label{fig:gw-box}
-\end{figure}
+\small
+\caption{Per-seed returns for Table~\ref{tab:cp}, rounded to the nearest integer, in the order vanilla / pessimistic / PB-GT.
+A superscript $v$ marks a vacuous shaped cell.
+The last column is the selected pessimistic checkpoint.}
+\label{tab:cp-seeds}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+Seed & Clean & Shared-random & PGD* & Shaped & Pes.\ step \\
+\midrule
+$0$ & $500/500/464$ & $215/500/74$ & $287/500/136$ & $234/500/56$ & $5000$ \\
+$1$ & $500/500/500$ & $152/500/15$ & $259/500/50$ & $26/500^{v}/376$ & $50000$ \\
+$2$ & $500/500/500$ & $500/500/287$ & $500/500/70$ & $500^{v}/500^{v}/500$ & $50000$ \\
+$3$ & $500/500/500$ & $116/500/259$ & $62/500/153$ & $406/500/257$ & $50000$ \\
+$4$ & $500/500/128$ & $471/417/23$ & $393/295/259$ & $335/100/105$ & $50000$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
-Table~\ref{tab:gw} and Figures~\ref{fig:gw-bars}--\ref{fig:gw-box} are the main empirical result of this v1.
-Clean returns are essentially identical (${\approx}7.35$): all three methods solve the short grid task when observations are intact.
-Under attack, \textbf{pessimistic Q-learning dominates}: $-21.8{\pm}50.0$ versus $-552.4{\pm}335.2$ (PB-GT) and $-682.1{\pm}329.0$ (vanilla).
-Pessimistic beats PB-GT in $96.4\%$ of seeds and vanilla in $96.0\%$; PB-GT beats vanilla in $60.6\%$ of seeds.
-PB-GT is therefore a \emph{modest} improvement over vanilla on average, not a near-match to belief-maximin defense.
+Table~\ref{tab:cp} is the trained CartPole comparison, and Table~\ref{tab:cp-seeds} is the same returns seed by seed.
+Vanilla's clean return is the greedy policy, and it is $500.0$ on every seed.
+Pessimistic's deployed maximin clean return is $500.0$ on every seed.
+PB-GT's clean mean is $418.3{\pm}163.1$.
+Under shared-random the means are $290.9{\pm}181.3$, $483.5{\pm}37.0$, and $131.3{\pm}131.4$.
+Under PGD* they are $300.1{\pm}163.8$, $459.0{\pm}91.6$, and $133.7{\pm}82.7$.
+Seed~$2$ ties vanilla at $500$ on shared-random and on PGD*.
+Seed~$4$ is the loss, on shared-random ($417$ against vanilla $471$), on PGD* ($295$ against $393$), and on the shaped attacker.
 
-The compute side of the tradeoff is unambiguous.
-Attack-time inference is $0.093$\,ms/step for pessimistic vs.\ $0.008$\,ms/step for PB-GT and vanilla---a \textbf{$11.6{\times}$} slowdown for full maximin (Figure~\ref{fig:speed}).
-This matches the motivation in~\citet{sun2024belief} that robustness from belief search is not free, and it is the reason PB-GT exists.
+Against the shaped attacker the per-seed comparison of pessimistic with vanilla is $2$ non-vacuous wins, $1$ vacuous win, $1$ tie, and $1$ loss.
+The non-vacuous wins are seeds $0$ and $3$.
+The vacuous win is seed~$1$, where pessimistic scores $500$ and the shaped attacker never ended an episode.
+The tie is seed~$2$, where both agents score $500$ and both cells are vacuous.
+The loss is seed~$4$.
+The unshaped matched attacker is vacuous against pessimistic on $4$ of $5$ seeds.
+Seed~$4$, the one non-vacuous cell, returns $500$, the same value vanilla returns on that seed.
+We do not treat that column as evidence of robustness, and it is omitted from Table~\ref{tab:cp}.
 
-\paragraph{Interpretation.}
-These numbers support two claims and refute a third.
-(1)~Belief-enriched maximin, even in this small discrete grid with a mean-over-belief policy approximation, is highly effective against a learned DQN attacker---consistent with the tabular motivation of~\citet{sun2024belief}.
-(2)~Pessimistic \emph{behavior} alone (PB-GT) is not enough to capture most of that robustness if the test policy is greedy on $\tilde s$.
-(3)~We do \emph{not} claim that PB-GT ``approaches BP-DQN robustness.''
-The gap of ${\approx}530$ return between pessimistic and PB-GT is the open problem for later versions of this line of work (hybrid inference, distillation, mixed targets; see \S\ref{sec:limit}).
+The selected pessimistic checkpoint is step $5000$ on seed~$0$ and step $50000$ on seeds $1$--$4$.
+On seed~$0$ the $10$k evaluation, $15$ episodes, read $234.9$ under a greedy readout and $312.9$ under deployed maximin.
+Training stopped and the weights rolled back to step $5000$, where both reads were $500$.
+The ordering is fragile above $\varepsilon{=}0.05$.
+On the two-seed pole-sensor sweep in Appendix~\ref{app:cp-extra}, the sound box holds $500$ at $\varepsilon\in\{0.025,0.05\}$, and at $\varepsilon{=}0.10$ the worst-of-$9$ sound mean is $139.9$ (greedy $10.6$, uniform $74.0$).
+At $\varepsilon\in\{0.15,0.20\}$ the worst-of-$9$ sound mean is $9.1$.
+
+The same sound box on frozen vanilla weights, with no fine-tuning, holds $500$ under the deployed maximin rule on clean episodes, under shared-random, and under PGD* (Table~\ref{tab:cp-sound}).
+Those two attacks drop the greedy readout of the same weights to $290.9{\pm}181.3$ and $300.1{\pm}163.8$.
+The frozen result supports the test-rule reading of the trained table: the gain is available from the decision rule on weights that were not fine-tuned under attack.
 
 \subsection{Inference cost}
 \label{sec:speed}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig3_inference.png}
-\caption{Attack-time ms/step (log scale). PB-GT matches greedy cost; pessimistic maximin is ${\approx}11.6{\times}$ slower on GridWorld and ${\approx}51{\times}$ slower on CartPole.}
+\includegraphics[width=\columnwidth]{figures/fig3_inference.pdf}
+\caption{Single-process inference time of the deployed rules, log scale.
+Tabular times are the attack path on $20$ seeds.
+Continuous times are single-process timings of the deployed box on the ten seeds.
+CartPole times are the trained sound box.}
 \label{fig:speed}
 \end{figure}
 
 \begin{table}[t]
 \centering
 \small
-\caption{Attack-time inference. CartPole uses matched-attacker eval.}
+\caption{Single-process inference, milliseconds per action, mean $\pm$ sample std across seeds.
+Tabular: attack path of the deployed rules, $n{=}20$.
+Continuous: single-process timings of the deployed box, $n{=}10$.
+CartPole: mean of the five per-seed means.}
 \label{tab:speed}
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}lccc@{}}
 \toprule
-Environment & Pes.\ (ms) & PB-GT (ms) & Slowdown \\
+Environment & Vanilla & Pessimistic & PB-GT \\
 \midrule
-GridWorld & $0.093$ & $0.008$ & $11.6{\times}$ \\
-CartPole & $1.88$ & $0.037$ & $51{\times}$ \\
+Tabular & $0.0080{\pm}0.0005$ & $0.0548{\pm}0.0024$ & $0.0080{\pm}0.0004$ \\
+Continuous & $0.0352{\pm}0.0069$ & $0.0810{\pm}0.0046$ & $0.0336{\pm}0.0008$ \\
+CartPole & $0.0337{\pm}0.0006$ & $1.14{\pm}0.05$ & $0.0339{\pm}0.0018$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:speed} and Figure~\ref{fig:speed} show that the speed advantage of PB-GT survives the deep port: maximin over $\kappa{=}20$ particles is ${\approx}51{\times}$ slower than greedy MLP inference on CartPole.
-If a deep PB-GT variant can be made robust, the overhead argument is already favorable.
-
-\subsection{CartPole-v1: preliminary, not confirmatory}
-\label{sec:cp}
-
-\begin{table}[t]
-\centering
-\small
-\caption{CartPole-v1 Double DQN, $5$ seeds, vanilla best-checkpoint restore. Mean $\pm$ std of per-seed mean returns ($100$ eval episodes). PGD* is defender-specific $32$-candidate search.}
-\label{tab:cp}
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Metric & Vanilla & Pes.\ (BP-style) & PB-GT \\
-\midrule
-Clean & $\mathbf{499{\pm}2}$ & $334{\pm}226$ & $403{\pm}214$ \\
-Matched atk. & $113{\pm}216$ & $11{\pm}3$ & $109{\pm}219$ \\
-Shared rand.\ $\delta$ & $284{\pm}176$ & $125{\pm}185$ & $150{\pm}209$ \\
-PGD* & $319{\pm}154$ & $131{\pm}126$ & $189{\pm}148$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figures/fig4_cartpole.png}
-\caption{CartPole metrics ($n{=}5$). No method dominates all columns; pessimistic is weak under matched attack. Treat as preliminary.}
-\label{fig:cp}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figures/fig5_cartpole_seeds.png}
-\caption{Per-seed CartPole clean return after vanilla restore-best. Vanilla solves all $5$ seeds; pessimistic and PB-GT collapse on some seeds.}
-\label{fig:cp-seeds}
-\end{figure}
-
-After adding mid-training evaluation and best-checkpoint restore for vanilla (the same idea we used to stabilize pessimistic fine-tuning), vanilla clean return is $499.1{\pm}1.9$ with \textbf{$5/5$ seeds solved} (Figure~\ref{fig:cp-seeds}).
-That fixes an earlier seed-$2$ collapse (clean $107$) in a previous snapshot.
-However, BP-style pessimistic and PB-GT are \emph{not} stable on clean ($334{\pm}226$ and $403{\pm}214$), and under matched attackers pessimistic returns ${\approx}11$ on every seed (Table~\ref{tab:cp}, Figure~\ref{fig:cp}).
-Shared-random and PGD* also fail to reproduce the GridWorld ordering.
-
-We \textbf{do not} claim a deep-RL robustness result on CartPole.
-Likely causes, all of which distinguish this port from Table~1a of~\citet{sun2024belief}: (i)~fine-tune hyperparameters were selected before vanilla restore and need retuning; (ii)~GRU particles with $\kappa{=}20$ are not PF-RNN BP-DQN; (iii)~matched SB3 attackers are retrained per defender and are a different threat than MinBest / PA-AD / iterative PGD; (iv)~$n{=}5$ is too small; (v)~CartPole is not continuous GridWorld.
-We keep CartPole as evidence that the \emph{pipeline} runs end-to-end and that the inference gap persists, and we move the main deep comparison to future continuous-GridWorld work.
+Table~\ref{tab:speed} and Figure~\ref{fig:speed} are the timing comparison.
+On the tabular grid the deployed maximin path costs $0.0548$\,ms against $0.0080$\,ms for vanilla, a factor of $6.8$.
+PB-GT matches the vanilla time.
+On the continuous grid the box costs $0.0810$\,ms against $0.0352$\,ms for vanilla, a factor of $2.3$, and PB-GT is $0.0336$\,ms.
+On the trained CartPole box the times are $0.0337$, $1.14$, and $0.0339$\,ms, about $34$ times for the maximin over the $16$-point lattice.
 
 \section{Related work}
 \label{sec:related}
 
-\textbf{State-observation attacks} on RL were demonstrated by~\citet{huang2017adversarial} and developed into SA-MDP~\citep{zhang2020robust}, ATLA~\citep{zhang2021robust}, and WocaR~\citep{liang2022wocar}; see~\citet{ilahi2022challenges} for a broader survey.
-\textbf{Pessimism and beliefs.}
-\citet{sun2024belief} is the direct predecessor of this paper: Stackelberg formulation, maximin Q, tabular belief, BP-DQN, DP-DQN.
-We reuse their tabular algorithms and study a cheaper test-time rule.
-\textbf{Other robust DQN.}
-CAR-DQN~\citep{li2024car} minimizes a surrogate of Bellman $\infty$-error under a consistency assumption; we list it as a future baseline, not a result we have.
-PF-RNN~\citep{ma2020pfrnn} is the belief module in BP-DQN; our CartPole GRU is a simplified stand-in.
-We do not claim novelty over SA-DQN / WocaR / ATLA / CAR-DQN on Atari---those comparisons require the continuous GridWorld / Atari bake-off outlined in \S\ref{sec:limit}.
+Huang et al.~\cite{huang2017adversarial} transferred FGSM-style attacks from supervised learning to Atari policies.
+Zhang et al.~\cite{zhang2020robust} formulated the state-adversarial MDP and the SA-DQN regularizer, and a follow-up trained the optimal adversary as an RL agent (ATLA)~\cite{zhang2021robust}.
+Liang et al.~\cite{liang2022wocar} estimate worst-case values without an explicit attacker during training (WocaR-RL).
+We train frozen DQN attackers for evaluation, following the attacker-as-MDP view, and we do not co-train them with the defender.
+Ilahi et al.~\cite{ilahi2022challenges} survey the broader attack literature.
+Sun, Liu, Ding, and Zheng~\cite{sun2025shift} show that $\ell_p$-bounded attacks often fail to change the semantics of an image, and they propose a diffusion attack that does.
+Our threat model stops at the $\varepsilon$-ball.
+Those semantic attacks are outside it, and nothing in the tables speaks to them.
 
-\section{Limitations and future work}
+The direct predecessor is Sun and Zheng~\cite{sun2024belief}: the Stackelberg formulation, the maximin rule, the tabular belief, and BP-DQN / DP-DQN.
+Our tabular agent follows their Algorithms~1--2.
+The deep experiments use the sound box of Appendix~\ref{app:box}.
+The belief network in BP-DQN is a particle-filter RNN~\cite{ma2020pfrnn}, which we do not train.
+CAR-DQN~\cite{li2024car} minimizes a surrogate of the Bellman infinity-error and keeps greedy inference.
+We have not run it, or SA-DQN, WocaR-RL, ATLA, or Atari.
+
+\section{Limitations}
 \label{sec:limit}
 
-\paragraph{What this v1 does \emph{not} show.}
-PB-GT does not approach pessimistic / BP-DQN robustness on GridWorld.
-CartPole is preliminary and currently negative for both robust methods.
-We have not reproduced Table~1a of~\citet{sun2024belief} (continuous GridWorld, BP-DQN, PGD / MinBest / PA-AD).
-We have not run CAR-DQN~\citep{li2024car}, SA-DQN, WocaR, or Atari Pong/Freeway.
-PGD* on CartPole is a $32$-sample random search, not iterative PGD.
-Vanilla GridWorld is evaluated against the pessimistic attacker, not a vanilla-matched attacker.
+\paragraph{Clean cost on the tabular grid.}
+The deployed maximin rule does poorly with no attacker on our $5{\times}5$ grid (\S\ref{sec:gw}).
+Our explanation, that a one-cell budget is large relative to this map, is untested; a larger grid would check it.
+CartPole shows no clean cost, and the continuous grid a mild one.
 
-\paragraph{Natural next experiments} (in the spirit of~\citet{sun2024belief}, \S4).
-(1)~\textbf{Continuous GridWorld + official BP-DQN}, then add PB-GT under the same eval protocol.
-(2)~\textbf{CAR-DQN} as an additional robust DQN baseline.
-(3)~\textbf{PB-GT refinements} aimed at Zheng's criterion---approach BP-DQN robustness at much lower overhead: hybrid greedy/maximin inference, softmin targets, policy distillation from a pessimistic teacher, mixed maximin/greedy backups.
-(4)~Atari (Pong/Freeway) + DP-DQN on GPU, after (1)--(3).
+\paragraph{Attackers.}
+The tabular attackers were trained against three defender seeds and reused across all $500$, so ``matched'' means matched to the rule rather than to each agent.
+On continuous GridWorld and CartPole the learned SB3 attackers do not observe the box; continuous matched search does score under the defender's actual rule.
+On CartPole the unshaped attacker found no effective attack against the pessimistic agent on $4$ of $5$ seeds (\S\ref{sec:cp}).
+
+\paragraph{Scope.}
+This is not a reproduction of BP-DQN: the deep experiments use a sound box built from the true dynamics instead of a learned belief, and we did not run their $10{\times}10$ maze, particle-filter RNN, or Atari.
+The deep results rest on fewer seeds ($10$ on the continuous grid with a five-seed swap, five on CartPole), a single continuous budget, and a CartPole ordering that weakens above $\varepsilon{=}0.05$.
+We did not compare against CAR-DQN, SA-DQN, WocaR-RL, or ATLA.
 
 \section{Conclusion}
 \label{sec:conc}
-We compared vanilla Q-learning, belief-enriched pessimistic Q-learning~\citep{sun2024belief}, and PB-GT---pessimistic behavior, greedy target, greedy test---on a $500$-seed tabular GridWorld and a $5$-seed CartPole Double-DQN port.
-The discrete result is clear: full pessimism is far more robust under learned attacks; PB-GT is far cheaper at test time and only slightly better than vanilla.
-The deep port is not yet a robustness result.
-A scoped reading of this v1 is therefore: \emph{the robustness--compute tradeoff of belief-maximin Q-learning is real; PB-GT is a well-defined fast baseline that does not close the gap}.
-Closing that gap, on the same environments used by~\citet{sun2024belief}, is the natural next paper.
+
+The robustness of belief-enriched pessimistic Q-learning, in the settings we ran, is mostly in the test-time maximin over the belief.
+On the tabular grid, switching the test rule from greedy to maximin wins on $89.6\%$ of seeds for the pessimistic $Q$-table and on $76.4\%$ for the PB-GT $Q$-table under worst-of-22, and the pessimistic backup adds protection on most seeds against the stronger attackers ($79.0\%$ belief-aware matched, $65.4\%$ worst-of-22), a smaller gain than the test-rule switch.
+PB-GT performs about like vanilla under attack, so adversarial data alone does not buy the robustness.
+On the continuous grid the five-seed swap shows no measurable further gain from the pessimistic backup.
+The frozen CartPole box holds $500$ under shared random noise and under PGD*, a random search inside the budget, on weights that were never fine-tuned with the box.
+The lookup costs about $6.8\times$ on the tabular grid, about $2.3\times$ on the continuous grid, and about $34\times$ on CartPole.
+On the tabular grid the same rule is weak with no attacker, because the belief stays a few cells wide; the useful follow-up is to spend the maximin only when that belief, or the greedy margin, says the observation is ambiguous.
 
 \section*{Acknowledgments}
-We thank Xiaolin Sun for the ICLR 2024 paper and open-source BP/DP-DQN codebase that this work builds on, and Yibin for workstation access for future deep experiments.
+We thank Xiaolin Sun for the open-source code.
 
-\bibliographystyle{plain}
 \begin{thebibliography}{99}
 \bibitem{huang2017adversarial}
 S.~Huang, N.~Papernot, I.~Goodfellow, Y.~Duan, and P.~Abbeel.
@@ -419,7 +871,7 @@ In \emph{ICLR Workshop}, 2017.
 \bibitem{ilahi2022challenges}
 I.~Ilahi, M.~Usama, J.~Qadir, M.~U.~Janjua, A.~Al-Fuqaha, D.~T.~Hoang, and D.~Niyato.
 Challenges and countermeasures for adversarial attacks on deep reinforcement learning.
-\emph{IEEE TAI}, 2022.
+\emph{IEEE Transactions on Artificial Intelligence}, 2022.
 
 \bibitem{li2024car}
 H.~Li, Z.~Zhang, et~al.
@@ -446,6 +898,12 @@ X.~Sun and Z.~Zheng.
 Belief-enriched pessimistic Q-learning against adversarial state perturbations.
 In \emph{ICLR}, 2024.
 
+\bibitem{sun2025shift}
+X.~Sun, F.~Liu, Z.~Ding, and Z.~Zheng.
+Diffusion guided adversarial state perturbations in reinforcement learning.
+In \emph{Advances in Neural Information Processing Systems}, 2025.
+arXiv:2511.07701.
+
 \bibitem{van2016deep}
 H.~van Hasselt, A.~Guez, and D.~Silver.
 Deep reinforcement learning with double Q-learning.
@@ -468,63 +926,432 @@ In \emph{ICLR}, 2021.
 \end{thebibliography}
 
 \appendix
-\section{PB-GT DQN pseudocode}
-\label{app:alg}
-Format mirrors Appendix~E, Algorithm~4 of~\citet{sun2024belief}. Differences from BP-DQN are in \textbf{bold}.
 
-\paragraph{Algorithm A: PB-GT DQN --- training.}
-\textbf{Input:} iterations $T$; pretrained vanilla $Q_v$; belief model $N_p$; target-update period $Z$; batch $D$; exploration $\varepsilon'$; budget $\varepsilon$; PGD candidates $K$.\\
-\textbf{Output:} fine-tuned $Q_g$.
-\begin{enumerate}[leftmargin=1.2em]
-\item $\mathcal{B}\leftarrow\emptyset$; $Q_g\leftarrow Q_v$; $Q'\leftarrow Q_v$; init $N_p$ history.
-\item \textbf{Optionally freeze all layers of $Q_g$ except the last linear head; use a small LR.}
-\item For $t=0,\ldots,T{-}1$:
-\item\quad Random-search PGD ($K$ candidates) for $\tilde s_t\in B_\varepsilon(s_t)$ minimizing $Q_g(s_t,\pi(\tilde s_t))$.
-\item\quad Form $M_t$ from $N_p$ (or sample in $B_\varepsilon(\tilde s_t)$).
-\item\quad $a_t=\arg\max_a\min_{m\in M_t}Q_g(m,a)$ w.p.\ $1-\varepsilon'$, else random.
-\item\quad Update $N_p$ history; execute $a_t$; observe $R_t$ and \textbf{true} $s_{t+1}$.
-\item\quad Store $(s_t,a_t,R_t,s_{t+1},M_{t+1})$ in $\mathcal{B}$ (belief stored for parity; \textbf{unused in the target}).
-\item\quad Sample minibatch of size $D$. Set \textbf{greedy Double-DQN targets}
-\[
-y_i=
-\begin{cases}
-R_i & \text{if }s_{i+1}\text{ terminal,}\\
-R_i+\gamma\,Q'\bigl(s_{i+1},\arg\max_{a'}Q_g(s_{i+1},a')\bigr) & \text{otherwise.}
-\end{cases}
-\]
-\textbf{Do not} use $\max_{a'}\min_{m\in M_{i+1}}Q'(m,a')$.
-\item\quad Gradient step on Huber $\sum_i (y_i-Q_g(s_i,a_i))^2$; update $Q'$ every $Z$ episodes.
-\end{enumerate}
+\section{The sound-box belief}
+\label{app:box}
 
-\paragraph{Algorithm B: PB-GT DQN --- testing.}
-For each step: observe $\tilde s_t$; take $a_t=\arg\max_a Q_g(\tilde s_t,a)$ (\textbf{no} $M_t$, \textbf{no} maximin); execute $a_t$.
+This appendix describes the belief used on continuous GridWorld and on CartPole.
+It is an axis-aligned box built from the known dynamics.
+It is not a particle set and it does not use a recurrent belief network.
 
-\section{Hyperparameters}
+On the continuous grid the state is $(x,y)$ and each action translates the agent by $0.5$ unless a wall blocks the move.
+Given a box $M_t$ and an observation $\tilde s_t$, we first propagate $M_t$ through the translation.
+If a wall makes the image of the box set-valued, we replace the box by the axis-aligned hull of the box and its image.
+We then intersect the propagated box with $B_\varepsilon(\tilde s_{t+1})$, and we clip to the domain $[0,5]^2$.
+The inner min is a hard minimum of $Q$ over a $3{\times}3$ lattice on that intersected box.
+A memoryless ball, used as an ablation, skips the propagation and places the same lattice on $B_\varepsilon(\tilde s)$ itself.
+Both sets contain the true state when the observation respects the $\ell_\infty$ budget.
+Only the box can shrink when later observations cut it.
+
+On CartPole the observation is $(x,\dot x,\theta,\dot\theta)$, and the dynamics are the standard cart-pole equations, applied as interval arithmetic on the box.
+The update filters first and then propagates.
+After an observation arrives, coordinates that the $\varepsilon$-ball rules out are cut away.
+The surviving box is then pushed one step through the interval dynamics under the action that was executed, and the next observation cuts it again.
+The inner min is a hard minimum over a $16$-point lattice, two samples along each coordinate of the box.
+When the intersection is computed correctly the true state stays inside the box, which is the sense in which the box is sound.
+
+\section{Attacker protocol and hyperparameters}
 \label{app:hyper}
 
-\paragraph{GridWorld.}
-Size $5{\times}5$; $R{=}-1$ default, $+10$ gold, $-10$ bomb; $\gamma{=}1$; $\alpha$ annealed $0.1\to 0.005$ (vanilla) / $0.1\to 0.01$ (robust); $\varepsilon$-greedy $0.2\to 0.01$ during robust train; vanilla $2000$ episodes; pes./PB-GT $500$ fine-tune episodes; eval $100$ episodes; max steps $1000$; attacker SB3 DQN, $\mathrm{MlpPolicy}$, $[256,128]$, $2{\times}10^5$ steps, lr $10^{-3}$, $\gamma{=}1$.
+\paragraph{Tabular attackers.}
+The evaluation set has twenty-one Stable-Baselines3 DQN attackers.
+Fifteen are belief-blind: three for each of five rules (vanilla, pessimistic $Q$ with maximin test, PB-GT $Q$ with greedy test, pessimistic $Q$ with greedy test, and PB-GT $Q$ with maximin test).
+Six are belief-aware: three for pessimistic $Q$ with maximin test and three for PB-GT $Q$ with maximin test.
+For each triple the attackers are trained against defender seeds $99999$, $99998$, and $99997$, each with its own attacker RNG, for $2{\times}10^5$ steps.
+The attacker's policy is an MLP with hidden sizes $[256,128]$, learning rate $10^{-3}$, and $\gamma{=}1$.
+Its action is a grid direction, clipped so that $\tilde s\in B_\varepsilon(s)$.
+A belief-aware attacker observes the true cell and a $25$-dimensional binary belief mask; a belief-blind attacker observes only the true cell.
+Matched return in the main table averages a rule's own three attackers (belief-aware for maximin rows, belief-blind otherwise).
+Worst-of-22 takes the per-seed minimum over all twenty-one attackers and the clean return.
+Vanilla's matched column uses its own three.
+Vanilla's worst-of-15 is the per-seed minimum of the original nine returns and the returns against the six swapped-rule attackers.
 
-\paragraph{CartPole vanilla DQN.}
-MLP $[128,128]$ ReLU; Adam $10^{-3}$; $\gamma{=}0.99$; buffer $10^5$; batch $128$; learn start $10^3$; train every $4$ steps; target copy every $10$ episodes; $\varepsilon$: $1.0\to 0.01$ over $50$k steps; Huber; grad clip $10$; $5{\times}10^5$ steps (+ continue if clean ${<}475$).
+\paragraph{Tabular GridWorld.}
+The grid is $5{\times}5$, with reward $-1$ per step, $+10$ on gold, and $-10$ on the bomb.
+We use $\gamma{=}1$.
+The learning rate $\alpha$ is annealed from $0.1$ to $0.005$ for vanilla and from $0.1$ to $0.01$ for the fine-tunes.
+During fine-tuning, $\varepsilon$-greedy exploration is annealed from $0.2$ to $0.01$.
+Vanilla trains for $2000$ episodes.
+Pessimistic Q-learning and PB-GT each fine-tune for $500$ episodes from that table.
+Evaluation uses $100$ episodes and a cap of $1000$ steps, repeated for seeds $0$--$499$.
+Both the pessimistic policy and its backup use a hard min over the belief.
+The PB-GT backup is greedy Q-learning on the true next state.
 
-\paragraph{Belief (CartPole).}
-GRU hidden $64$; $\kappa{=}20$; $30$k pretrain steps; Adam $10^{-3}$; mode \texttt{learned}.
+\paragraph{Continuous GridWorld.}
+The domain is $[0,5]^2$ with step size $0.5$.
+The network is a $2{\to}128{\to}128{\to}4$ MLP trained with Double DQN, Huber loss, and Adam.
+The learning rate is $10^{-3}$ for vanilla and $10^{-4}$ for fine-tuning.
+We use $\gamma{=}0.99$, a replay buffer of $10^5$, batch size $64$, learning starts at $10^3$ steps, and the target network is copied every $500$ steps.
+Vanilla trains for $80$k steps.
+Pessimistic and PB-GT fine-tune for $25$k steps from the same vanilla weights.
+The budget in the production table is $\varepsilon{=}0.25$ under $L_\infty$.
+The inner min is a hard min over a $3{\times}3$ lattice.
+Evaluation uses $50$ episodes, $10$ seeds for the main table, and a cap of $100$ steps.
+The swap table uses seeds $0$--$4$.
+PGD-10 is a $10$-step iterative MinBest attack.
+Matched search uses $32$ candidates.
+Matched SB3 trains for $40$k steps with hidden sizes $[128,128]$ and a $5{\times}5$ perturbation grid.
 
-\paragraph{Pessimistic fine-tune.}
-Clone vanilla; freeze backbone; LR $5{\cdot}10^{-5}$; $\leq 10^5$ steps; $\varepsilon$ $0.02\to 0.005$ / $15$k; mid-eval every $25$k; early stop after best greedy $\geq 475$ if greedy ${<}400$ or drop ${>}75$; restore best; maximin target and test.
+\paragraph{CartPole.}
+The vanilla network has hidden sizes $[128,128]$ and ReLU activations.
+We use Adam at $10^{-3}$, $\gamma{=}0.99$, a buffer of $10^5$, batch size $128$, learning starts at $10^3$ steps, a gradient step every $4$ environment steps, and a target copy every $10$ episodes.
+Exploration is annealed from $1.0$ to $0.01$ over $50$k steps.
+The loss is Huber with gradient clipping at $10$.
+Training runs for $5{\times}10^5$ steps.
+The trained sound-box fine-tunes freeze the backbone and train the last linear layer at $10^{-5}$.
+The inner min uses $16$ lattice points on the interval box.
+Pessimistic fine-tuning is capped at $5{\times}10^4$ steps and is scored every $5{\times}10^3$ steps, including step~$0$, by clean return under deployed maximin.
+Training stops early if that return has reached $475$ and a later evaluation falls below $400$.
+PB-GT runs for $4{\times}10^4$ steps with greedy Double DQN targets.
+Evaluation uses $\varepsilon{=}0.05$, $50$ episodes, and five seeds.
+PGD* draws $32$ candidates.
+Unshaped and shaped SB3 attackers train for $40$k steps.
+The shaped reward is $|\theta|+0.1|x|$.
+Checkpoint selection is in \S\ref{sec:cp}.
 
-\paragraph{PB-GT fine-tune.}
-Clone vanilla; freeze backbone; LR $10^{-5}$; $4{\times}10^4$ steps; $\varepsilon$ $0.01\to 0.005$ / $10$k; pessimistic behavior + PGD $\tilde s$; greedy target; greedy test.
+\section{Older tabular attack pools}
+\label{app:worst910}
 
-\paragraph{Matched attackers (CartPole).}
-SB3 DQN $[128,128]$; $8{\times}10^4$ steps per (seed, defender); lr $10^{-3}$; buffer $5{\times}10^4$; batch $128$; $\gamma{=}0.99$; explore fraction $0.3$, final $\varepsilon{=}0.05$.
+Table~\ref{tab:gw-w910} keeps the belief-blind matched means for the maximin rows and the older worst-of-9/10/15/16 pools.
+Worst-of-9 is the original nine attackers; worst-of-10 adds no attack.
+Worst-of-15 is all fifteen belief-blind attackers; worst-of-16 adds no attack.
+For vanilla, pessimistic greedy, and PB-GT greedy, worst-of-9 agrees with worst-of-10 and worst-of-15 agrees with worst-of-16, because clean return is never the minimum there.
+Under worst-of-9, PB-GT greedy beats vanilla on $27.8\%$ of seeds, ties on $70.0\%$, and loses on $2.2\%$; under worst-of-10 the same comparison is unchanged for those rows.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Tabular grid, $500$ seeds: belief-blind matched (own~3) for the maximin rows, plus worst-of-9/10/15/16.
+Mean $\pm$ sample std (ddof${=}1$).
+A dash means the column is not the headline matched metric for that row (greedy and vanilla matched stay in Table~\ref{tab:gw}).}
+\label{tab:gw-w910}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Rule & Belief-blind matched & Worst-of-9 & Worst-of-10 & Worst-of-15 & Worst-of-16 \\
+\midrule
+Vanilla & --- & $-950.67{\pm}65.09$ & $-950.67{\pm}65.09$ & $-968.86{\pm}49.87$ & $-968.86{\pm}49.87$ \\
+Pes.\ $Q$, maximin & $-158.93{\pm}106.87$ & $-319.92{\pm}126.29$ & $-702.61{\pm}276.39$ & $-495.79{\pm}173.47$ & $-719.16{\pm}251.38$ \\
+Pes.\ $Q$, greedy & --- & $-968.64{\pm}45.79$ & $-968.64{\pm}45.79$ & $-975.80{\pm}42.18$ & $-975.80{\pm}42.18$ \\
+PB-GT $Q$, greedy & --- & $-924.36{\pm}82.48$ & $-924.36{\pm}82.48$ & $-950.30{\pm}60.27$ & $-950.30{\pm}60.27$ \\
+PB-GT $Q$, maximin & $-352.12{\pm}148.23$ & $-377.43{\pm}132.71$ & $-753.24{\pm}229.41$ & $-542.93{\pm}190.87$ & $-763.42{\pm}216.26$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \section{Code and data}
 \label{app:code}
-GridWorld: \texttt{main\_with\_vanilla.py}, \texttt{gridworld\_experiments\_500runs.csv}.
-CartPole: \texttt{main\_cartpole\_dqn.py}, \texttt{cartpole\_belief.py}, \texttt{cartpole\_experiments\_restore\_5runs.csv}.
-BP/DP-DQN reference code: \url{https://github.com/SliencerX/Belief-enriched-robust-Q-learning}.
-CAR-DQN (future baseline): \url{https://github.com/leoranlmia/CAR-DQN}.
+
+Code and logs: \url{https://github.com/adithya-venkatesh/RL}.
+
+{\raggedright\footnotesize
+\begin{itemize}[leftmargin=1.1em]
+\item Tabular $2{\times}2$, $500$ seeds, fifteen belief-blind attackers:
+\texttt{gridworld\_target\_test\_swap\_tabular\_matched15\_v3.csv}.
+\item Worst-of-16 (belief-blind attacks plus no attack), with summary and win-rate sidecars:
+\texttt{gridworld\_worst\_of\_16\_v3.csv}.
+\item Belief-aware attackers and worst-of-22, with summary and win-rate sidecars:
+\texttt{gridworld\_belief\_aware\_attack\_v3.csv}
+(\texttt{gridworld\_belief\_aware\_attack\_v3.py},
+\texttt{gridworld\_belief\_aware\_common\_v3.py}).
+\item Vanilla clean return, matched return on its own three attackers, and the original nine attack returns:
+\texttt{gridworld\_experiments\_500runs\_final\_v3.csv}.
+Vanilla against the six swapped-rule attackers, and the worst-of-15 minimum:
+\texttt{gridworld\_vanilla\_vs\_swap\_attackers\_v3.csv}.
+\item Belief size and clean truncation, $50$ seeds, $100$ episodes:
+\texttt{gridworld\_clean\_maximin\_belief\_v3.csv}.
+\item Tabular attack-path timing, $20$ seeds:
+\texttt{gridworld\_inference\_20seeds\_final\_v3.csv}.
+\item Continuous production comparison, ten seeds, $\varepsilon{=}0.25$:
+\texttt{gw\_prod\_eps025\_10seeds\_v3.csv}.
+\item Continuous swap, seeds $0$--$4$:
+\texttt{gridworld\_target\_test\_swap\_cgw\_v3.csv}.
+PGD-10 under the swapped test rule:
+\texttt{gridworld\_target\_test\_swap\_cgw\_pgd\_offdiag\_v3.csv}.
+\item Single-process timings.
+Continuous rows are the deployed box.
+Tabular rows are greedy clean readouts and are not the maximin cost in Table~\ref{tab:speed}:
+\texttt{inference\_retime\_singleproc\_v3.csv}.
+\item Trained CartPole sound box, five seeds:
+\texttt{cartpole\_trained\_box\_5seeds\_v3.csv},
+checkpoint curve \texttt{cartpole\_trained\_box\_5seeds\_curves\_v3.csv}.
+\item Frozen CartPole probes:
+\texttt{cartpole\_sound\_5seeds.csv},
+\texttt{cartpole\_sound\_bias5seeds.csv},
+\texttt{cartpole\_sound\_epssweep\_v2.csv},
+\texttt{cartpole\_sound\_possensor\_5seeds.csv},
+and the one-seed pole-sensor probe \texttt{cartpole\_sound\_epssweep.csv}.
+\item Continuous budget sweeps:
+\texttt{gw\_epssweep\_eps025.csv},
+\texttt{gw\_epssweep\_eps030.csv},
+\texttt{gw\_epssweep\_eps035.csv},
+\texttt{gw\_epssweep\_eps040.csv},
+\texttt{gw\_epssweep\_eps050.csv},
+\texttt{gw\_epssweep\_ft25k\_eps030.csv},
+\texttt{gw\_epssweep\_ft25k\_eps035.csv},
+\texttt{gw\_epssweep\_ft25k\_eps040.csv}.
+\item GRU-particle port that did not hold: \texttt{cartpole\_experiments\_restore\_5runs.csv}.
+\item Figures: \texttt{arxiv\_v1/build\_figures.py}.
+\end{itemize}}
+Reference code for BP-DQN and DP-DQN: \url{https://github.com/SliencerX/Belief-enriched-robust-Q-learning}.
+CAR-DQN: \url{https://github.com/leoranlmia/CAR-DQN}.
+
+\section{PB-GT DQN pseudocode}
+\label{app:alg}
+
+The tabular loops are Algorithms~\ref{alg:pes-tab} and~\ref{alg:pbgt-tab}.
+The deep loop uses the sound box of Appendix~\ref{app:box}.
+
+\paragraph{Training.}
+Start from a pretrained vanilla network $Q_v$ and a copy $Q'$ used as the target network.
+On CartPole, freeze every layer except the last linear layer.
+For each step, draw an attacked observation $\tilde s_t\in B_\varepsilon(s_t)$ with the training attack (the white-box objective in the tabular case, a random-search perturbation in these deep runs).
+Form the box $M_t$ by the update in Appendix~\ref{app:box}.
+With probability $1-\varepsilon'$ take $a_t=\arg\max_a\min_{m\in M_t}Q_g(m,a)$, and otherwise take a random action.
+Execute $a_t$, observe the reward and the true next state $s_{t+1}$, and store $(s_t,a_t,R_t,s_{t+1})$.
+The box may be stored with the transition for bookkeeping.
+The target does not read it.
+The target is the Double DQN greedy target on the true next state,
+\[
+y=
+\begin{cases}
+R & \text{if $s'$ is terminal,}\\
+R+\gamma\,Q'\bigl(s',\,\arg\max_{a'}Q_g(s',a')\bigr) & \text{otherwise.}
+\end{cases}
+\]
+Take a gradient step on the Huber loss and copy $Q_g$ into $Q'$ on the usual period.
+Do not use a maximin target.
+
+\paragraph{Testing.}
+Observe $\tilde s_t$ and take $a_t=\arg\max_a Q_g(\tilde s_t,a)$.
+There is no box and no maximin at test time.
+
+\section{Budgets that were swept}
+\label{app:eps}
+
+Table~\ref{tab:cgw} is the $80$k vanilla plus $25$k fine-tune schedule at $\varepsilon{=}0.25$, ten seeds, and $50$ episodes.
+That final schedule was run only at $\varepsilon{=}0.25$.
+$\varepsilon{=}0.25$ was chosen from the two earlier, shorter sweeps below, where the pessimistic greedy clean return is least damaged.
+In Table~\ref{tab:eps-100k} that column is highest at $0.25$.
+The deployed maximin clean return in the same table is negative at every budget and closest to zero at $0.30$.
+Table~\ref{tab:eps-40k} does not include $0.25$.
+Neither sweep is the production comparison.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\caption{$100$k vanilla steps, $40$k fine-tuning, $30$ episodes, seeds $0$--$2$.
+Clean return, mean $\pm$ sample std across seeds.
+Pessimistic maximin is the deployed box rule.}
+\label{tab:eps-100k}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$\varepsilon$ & Vanilla & \shortstack{Pes.\\maximin} & \shortstack{Pes.\\greedy} & PB-GT \\
+\midrule
+$0.25$ & $4.46{\pm}0.24$ & $-3.14{\pm}3.45$ & $4.03{\pm}0.44$ & $4.46{\pm}0.24$ \\
+$0.30$ & $4.46{\pm}0.24$ & $-0.07{\pm}0.25$ & $2.60{\pm}1.42$ & $4.43{\pm}0.26$ \\
+$0.35$ & $4.46{\pm}0.24$ & $-4.57{\pm}4.00$ & $-0.74{\pm}3.28$ & $4.46{\pm}0.24$ \\
+$0.40$ & $4.46{\pm}0.24$ & $-21.23{\pm}20.84$ & $-6.81{\pm}9.61$ & $4.43{\pm}0.23$ \\
+$0.50$ & $4.46{\pm}0.24$ & $-10.92{\pm}8.92$ & $-3.23{\pm}3.67$ & $2.24{\pm}3.94$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\caption{$40$k vanilla steps, $25$k fine-tuning, $20$ episodes, seeds $0$--$1$.
+Clean return, mean $\pm$ sample std across the two seeds.}
+\label{tab:eps-40k}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$\varepsilon$ & Vanilla & \shortstack{Pes.\\maximin} & \shortstack{Pes.\\greedy} & PB-GT \\
+\midrule
+$0.30$ & $4.58{\pm}0.11$ & $-1.50{\pm}6.36$ & $3.82{\pm}0.74$ & $4.58{\pm}0.11$ \\
+$0.35$ & $4.58{\pm}0.11$ & $1.92{\pm}1.73$ & $1.03{\pm}0.81$ & $4.58{\pm}0.11$ \\
+$0.40$ & $4.58{\pm}0.11$ & $-8.12{\pm}5.98$ & $2.33{\pm}1.10$ & $4.58{\pm}0.11$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The CartPole pole-sensor sweeps recorded attack return, not clean return.
+Seed~$0$ alone, $3$ episodes per cell, covered $\varepsilon\in\{0.05,0.10,0.20\}$.
+Seeds $0$ and $1$, $20$ episodes per cell, covered $\varepsilon\in\{0.025,0.05,0.10,0.15,0.20\}$.
+Table~\ref{tab:cp-eps} is the mean of those two seeds under the worst of nine constant biases.
+The same two seeds under an exhaustive search of the nine directions have sound returns $500.0$, $500.0$, $190.6$, $86.6$, and $29.9$ at those five budgets, with greedy $141.2$, $488.0$, $500.0$, $371.2$, $14.8$ and uniform $470.1$, $462.0$, $133.2$, $13.8$, $14.9$.
+On the one-seed run the worst-of-nine sound returns are $500.0$, $134.0$, and $8.7$, with greedy $179.0$, $10.7$, $34.7$ and uniform $500.0$, $61.0$, $8.7$.
+Its exhaustive sound returns are $500.0$, $180.3$, and $21.7$, with greedy $500.0$, $500.0$, $10.0$ and uniform $500.0$, $235.0$, $15.0$.
+
+\section{CartPole probes outside the trained comparison}
+\label{app:cp-extra}
+
+The main CartPole comparison is the trained sound box in \S\ref{sec:cp}.
+This appendix keeps the frozen-weight rule swap, the failed GRU-particle port, pole-sensor attacks, the $\varepsilon$ sweep, and a position-sensor variant.
+Figure~\ref{fig:cp} plots the four frozen rules in Table~\ref{tab:cp-sound}.
+
+\paragraph{Frozen vanilla $Q$.}
+Table~\ref{tab:cp-sound} and Figure~\ref{fig:cp} put four test-time rules on the untouched per-seed vanilla checkpoint ($\varepsilon{=}0.05$, $50$ episodes, five seeds).
+All four solve clean CartPole.
+Shared-random and PGD* drop greedy to $290.9{\pm}181.3$ and $300.1{\pm}163.8$.
+The sound box and the same box with an interval inner min both hold $500.0{\pm}0.0$ on those two columns.
+Uniform-sample maximin does not ($286.5{\pm}184.2$ shared, $345.0{\pm}165.3$ PGD*) and is worse than greedy against a matched SB3 attacker ($78.7{\pm}72.9$ against $212.6{\pm}262.5$, with no vacuous seeds).
+The sound matched column is vacuous on all five seeds and is omitted.
+The hold at $500$ is the test-time rule on weights that were not fine-tuned.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Four decision rules on frozen vanilla CartPole weights, $\varepsilon{=}0.05$, $50$ episodes, five seeds.
+Mean $\pm$ sample std of the per-seed means.
+The matched column is omitted for the sound rows because the SB3 attacker never ended an episode on any seed.
+Greedy matched is vacuous on seed~$2$ only.}
+\label{tab:cp-sound}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Rule & Clean & Shared-random & PGD* & Matched SB3 \\
+\midrule
+Greedy & $500.0{\pm}0.0$ & $290.9{\pm}181.3$ & $300.1{\pm}163.8$ & $212.6{\pm}262.5$ \\
+Uniform sample & $500.0{\pm}0.0$ & $286.5{\pm}184.2$ & $345.0{\pm}165.3$ & $78.7{\pm}72.9$ \\
+Sound box & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & --- \\
+Sound + interval min & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig4_cartpole.pdf}
+\caption{Frozen vanilla CartPole $Q$, the four test-time rules of Table~\ref{tab:cp-sound}, $\varepsilon{=}0.05$, five seeds.
+Shared-random and PGD* drop greedy and uniform-sample maximin.
+The sound box and the interval-min variant of that box hold $500$.
+Matched SB3 is omitted.}
+\label{fig:cp}
+\end{figure}
+
+\paragraph{Failed GRU-particle port.}
+An earlier CartPole port used Double DQN with a GRU particle belief, trained for five seeds with the vanilla checkpoint restored, and evaluated for $100$ episodes.
+Table~\ref{tab:cp-gru} and Figure~\ref{fig:cp-seeds} record that port.
+Vanilla's clean return is $499.1{\pm}1.9$.
+If the pessimistic fine-tune is scored with the maximin rule, clean return is $132.1{\pm}126.1$.
+A greedy readout of those same weights is $333.6{\pm}225.8$, and PB-GT's greedy clean return is $403.1{\pm}214.1$.
+Matched-attacker return for the pessimistic port is $11.0{\pm}2.9$ on every seed in the table of means.
+Matched-attacker inference in that port was $1.88$\,ms/step for the particle maximin and $0.037$\,ms/step for the greedy test.
+The main result uses the sound box of Table~\ref{tab:cp} instead.
+
+\begin{table}[t]
+\centering
+\small
+\caption{GRU-particle CartPole port, five seeds, $100$ episodes.
+Mean $\pm$ sample std of the per-seed means.
+Pessimistic clean is the maximin readout.
+This table is not the main CartPole result.}
+\label{tab:cp-gru}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Metric & Vanilla & Pes.\ (GRU) & PB-GT \\
+\midrule
+Clean & $499.1{\pm}1.9$ & $132.1{\pm}126.1$ & $403.1{\pm}214.1$ \\
+Matched attacker & $113.4{\pm}216.3$ & $11.0{\pm}2.9$ & $108.9{\pm}218.7$ \\
+Shared-random & $284.0{\pm}175.9$ & $124.6{\pm}185.2$ & $149.5{\pm}208.5$ \\
+PGD* & $318.8{\pm}154.2$ & $131.0{\pm}126.0$ & $189.0{\pm}147.9$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig5_cartpole_seeds.pdf}
+\caption{Per-seed clean return after the GRU-particle fine-tune, greedy readout.
+The main CartPole experiment uses the sound box instead.}
+\label{fig:cp-seeds}
+\end{figure}
+
+\paragraph{Pole-sensor attacks.}
+Table~\ref{tab:cp-bias} adds two structured pole-sensor attacks at $\varepsilon{=}0.05$ (five seeds, $20$ episodes) on frozen vanilla $Q$.
+Worst-of-$9$ constant bias drops greedy to $178.8{\pm}189.7$.
+The sound box is the highest mean of the three rules ($428.6{\pm}146.6$) and is not $500$ on every seed.
+Exhaustive one-step search is weaker against greedy ($403.1{\pm}201.8$) and lowers uniform ($252.4{\pm}226.6$).
+The sound mean on that attack is $419.3{\pm}180.4$.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Frozen vanilla CartPole $Q$, pole-sensor attacks, $\varepsilon{=}0.05$, five seeds, $20$ episodes.
+Worst-of-$9$ is the min over the nine constant biases in $\{-\varepsilon,0,\varepsilon\}^2$ on $(\theta,\dot\theta)$.
+Exhaustive search picks the bias with the lowest $Q(s,\pi(\tilde s))$ at each step.}
+\label{tab:cp-bias}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Attack & Greedy & Uniform & Sound \\
+\midrule
+Worst-of-$9$ & $178.8{\pm}189.7$ & $312.1{\pm}208.7$ & $428.6{\pm}146.6$ \\
+Exhaustive $1$-step & $403.1{\pm}201.8$ & $252.4{\pm}226.6$ & $419.3{\pm}180.4$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Pole-sensor $\varepsilon$ sweep.}
+Table~\ref{tab:cp-eps} averages two seeds and $20$ episodes.
+Attacks perturb only $(\theta,\dot\theta)$.
+The sound box holds $500$ at $\varepsilon\in\{0.025,0.05\}$ on those two seeds and drops at $\varepsilon{=}0.10$: worst-of-$9$ sound $139.9$, greedy $10.6$, uniform $74.0$.
+The five-seed check at $\varepsilon{=}0.05$ is Table~\ref{tab:cp-bias}.
+At $\varepsilon\in\{0.15,0.20\}$ the worst-of-$9$ sound mean is $9.1$.
+
+\begin{table}[h]
+\centering
+\small
+\caption{CartPole pole-sensor $\varepsilon$ sweep on frozen vanilla $Q$.
+Mean return over two seeds and $20$ episodes.
+Attack definitions match Table~\ref{tab:cp-bias}.}
+\label{tab:cp-eps}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+$\varepsilon$ & Attack & Greedy & Uniform & Sound \\
+\midrule
+$0.025$ & worst-of-$9$ & $329.8$ & $487.8$ & $500.0$ \\
+$0.025$ & exhaustive & $141.2$ & $470.1$ & $500.0$ \\
+$0.05$ & worst-of-$9$ & $51.0$ & $439.3$ & $500.0$ \\
+$0.05$ & exhaustive & $488.0$ & $462.0$ & $500.0$ \\
+$0.10$ & worst-of-$9$ & $10.6$ & $74.0$ & $139.9$ \\
+$0.10$ & exhaustive & $500.0$ & $133.2$ & $190.6$ \\
+$0.15$ & worst-of-$9$ & $16.8$ & $14.8$ & $9.1$ \\
+$0.15$ & exhaustive & $371.2$ & $13.8$ & $86.6$ \\
+$0.20$ & worst-of-$9$ & $33.0$ & $9.1$ & $9.1$ \\
+$0.20$ & exhaustive & $14.8$ & $14.9$ & $29.9$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Position-sensor restriction.}
+When only $(x,\theta)$ are attacked and the velocities are observed cleanly, with $\varepsilon_{\mathrm{vec}}=[0.05,0,0.05,0]$, the intersection can contract.
+On the sound-box log the filtered widths average $0.0089$ in $x$ and $0.0089$ in $\theta$, against an unfiltered width of $2\varepsilon=0.10$, with velocity widths about $0.0002$ and no empty intersections across the five seeds.
+Shared-random and PGD* still hold the sound box at $500$, against greedy $276.6{\pm}201.5$ and $290.3{\pm}170.4$ (uniform $290.9{\pm}178.7$ and $204.6{\pm}176.7$).
+The sound matched mean is $494.3{\pm}12.7$ and is vacuous on $4$ of $5$ seeds.
+We do not treat that column as a robustness claim.
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Frozen vanilla CartPole $Q$, position-sensor threat $\varepsilon_{\mathrm{vec}}=[0.05,0,0.05,0]$, $50$ episodes, five seeds.
+The sound matched column is vacuous on $4$ of $5$ seeds.}
+\label{tab:cp-pos}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Rule & Clean & Shared-random & PGD* & Matched SB3 \\
+\midrule
+Greedy & $500.0{\pm}0.0$ & $276.6{\pm}201.5$ & $290.3{\pm}170.4$ & $134.7{\pm}205.3$ \\
+Uniform sample & $498.1{\pm}4.3$ & $290.9{\pm}178.7$ & $204.6{\pm}176.7$ & $139.5{\pm}206.1$ \\
+Sound box & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $494.3{\pm}12.7$ \\
+Sound + interval min & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $500.0{\pm}0.0$ & $494.3{\pm}12.7$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \end{document}
